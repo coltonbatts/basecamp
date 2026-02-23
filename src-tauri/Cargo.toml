@@ -1,0 +1,25 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Basecamp local-first LLM experimentation lab"
+authors = ["Basecamp"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.4", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+keyring = "2.3"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tauri = { version = "2.10.0", features = [] }
+tauri-plugin-dialog = "2.6.0"
+uuid = { version = "1.11.1", features = ["v4"] }
