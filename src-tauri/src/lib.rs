@@ -18,9 +18,11 @@ const KEYRING_ACCOUNT: &str = "openrouter_api_key";
 const DB_FILE_NAME: &str = "basecamp.db";
 const SETTING_WORKSPACE_PATH: &str = "workspace_path";
 const SETTING_TOOLS_ENABLED: &str = "tools_enabled";
+const SETTING_DEFAULT_MODEL: &str = "default_model";
 const LEGACY_CAMP_SCHEMA_VERSION: &str = "0.0";
 const CAMP_SCHEMA_VERSION: &str = "0.1";
 const CAMPS_DIR_NAME: &str = "camps";
+const WORKSPACE_CONTEXT_DIR: &str = "context";
 const CAMP_CONFIG_FILE: &str = "camp.json";
 const CAMP_SYSTEM_PROMPT_FILE: &str = "system_prompt.md";
 const CAMP_MEMORY_FILE: &str = "memory.json";
@@ -714,6 +716,10 @@ fn camp_context_dir(camp_dir: &Path) -> PathBuf {
     camp_dir.join(CAMP_CONTEXT_DIR)
 }
 
+fn workspace_context_dir(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(WORKSPACE_CONTEXT_DIR)
+}
+
 fn camp_artifacts_dir(camp_dir: &Path) -> PathBuf {
     camp_dir.join(CAMP_ARTIFACTS_DIR)
 }
@@ -812,6 +818,59 @@ fn to_context_relative_display(context_root: &Path, path: &Path) -> Result<Strin
     }
 
     Ok(display)
+}
+
+fn list_context_files_recursive(
+    context_root: &Path,
+    current_dir: &Path,
+    entries: &mut Vec<String>,
+) -> Result<(), String> {
+    for entry_result in
+        fs::read_dir(current_dir).map_err(|err| format!("Unable to list context directory: {err}"))?
+    {
+        let entry = entry_result.map_err(|err| format!("Unable to read context entry: {err}"))?;
+        let entry_path = entry.path();
+        let canonical_entry = fs::canonicalize(&entry_path)
+            .map_err(|err| format!("Unable to resolve context entry: {err}"))?;
+        ensure_path_within_root(context_root, &canonical_entry)?;
+
+        if canonical_entry.is_dir() {
+            list_context_files_recursive(context_root, &canonical_entry, entries)?;
+            continue;
+        }
+
+        if canonical_entry.is_file() {
+            entries.push(to_context_relative_display(context_root, &canonical_entry)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn prune_empty_context_parents(context_root: &Path, start_dir: &Path) -> Result<(), String> {
+    let mut current = start_dir.to_path_buf();
+
+    while current != context_root {
+        if !current.starts_with(context_root) {
+            break;
+        }
+
+        let mut entries =
+            fs::read_dir(&current).map_err(|err| format!("Unable to inspect context directory: {err}"))?;
+        if entries.next().is_some() {
+            break;
+        }
+
+        fs::remove_dir(&current).map_err(|err| format!("Unable to remove context directory: {err}"))?;
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+
+        current = parent.to_path_buf();
+    }
+
+    Ok(())
 }
 
 fn validate_identifier(value: &str, field_name: &str) -> Result<String, String> {
@@ -2189,6 +2248,29 @@ fn get_tools_enabled(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn set_default_model(state: State<'_, AppState>, model: String) -> Result<(), String> {
+    let normalized_model = validate_non_empty(&model, "model")?;
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    set_setting_value(&connection, SETTING_DEFAULT_MODEL, &normalized_model)
+        .map_err(|err| format!("Unable to save default model setting: {err}"))
+}
+
+#[tauri::command]
+fn get_default_model(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    get_setting_value(&connection, SETTING_DEFAULT_MODEL)
+        .map_err(|err| format!("Unable to load default model setting: {err}"))
+}
+
+#[tauri::command]
 fn insert_tool_call_start(
     state: State<'_, AppState>,
     payload: ToolCallStartPayload,
@@ -2367,6 +2449,103 @@ fn write_note_to_workspace(
         path: note_path.to_string_lossy().into_owned(),
         bytes_written: contents.as_bytes().len(),
     })
+}
+
+#[tauri::command]
+fn workspace_list_context_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let workspace_path = require_workspace_path(&connection)?;
+    let workspace_context = workspace_context_dir(&workspace_path);
+
+    fs::create_dir_all(&workspace_context)
+        .map_err(|err| format!("Unable to create workspace context directory: {err}"))?;
+
+    let context_root = fs::canonicalize(&workspace_context)
+        .map_err(|err| format!("Unable to resolve workspace context directory: {err}"))?;
+
+    let mut entries = Vec::new();
+    list_context_files_recursive(&context_root, &context_root, &mut entries)?;
+    entries.sort();
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn camp_attach_workspace_context_file(
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let workspace_path = require_workspace_path(&connection)?;
+    let workspace_context = workspace_context_dir(&workspace_path);
+
+    fs::create_dir_all(&workspace_context)
+        .map_err(|err| format!("Unable to create workspace context directory: {err}"))?;
+
+    let workspace_context_root = fs::canonicalize(&workspace_context)
+        .map_err(|err| format!("Unable to resolve workspace context directory: {err}"))?;
+    let source = resolve_existing_context_target(&workspace_context_root, &path, "path", false)?;
+
+    if !source.is_file() {
+        return Err("Requested path is not a file.".to_string());
+    }
+
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let camp_context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let destination = resolve_write_context_target(&camp_context_root, &path)?;
+
+    fs::copy(&source, &destination)
+        .map_err(|err| format!("Unable to attach context file to camp: {err}"))?;
+    touch_camp_updated_at(&camp_dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn camp_detach_workspace_context_file(
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let camp_context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+
+    let relative = validate_context_relative_path(&path, "path", false)?;
+    let target = camp_context_root.join(relative);
+
+    if !target.exists() {
+        return Ok(());
+    }
+
+    let canonical_target =
+        fs::canonicalize(&target).map_err(|err| format!("Unable to resolve path: {err}"))?;
+    ensure_path_within_root(&camp_context_root, &canonical_target)?;
+
+    if !canonical_target.is_file() {
+        return Err("Requested path is not a file.".to_string());
+    }
+
+    fs::remove_file(&canonical_target)
+        .map_err(|err| format!("Unable to detach context file from camp: {err}"))?;
+
+    if let Some(parent) = canonical_target.parent() {
+        prune_empty_context_parents(&camp_context_root, parent)?;
+    }
+
+    touch_camp_updated_at(&camp_dir)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2895,12 +3074,17 @@ pub fn run() {
             pick_workspace_folder,
             set_tools_enabled,
             get_tools_enabled,
+            set_default_model,
+            get_default_model,
             insert_tool_call_start,
             update_tool_call_result,
             update_tool_call_error,
             list_tool_calls_for_run,
             search_runs_db,
             write_note_to_workspace,
+            workspace_list_context_files,
+            camp_attach_workspace_context_file,
+            camp_detach_workspace_context_file,
             tauri_cmd_read_context_file,
             tauri_cmd_list_context_files,
             tauri_cmd_write_context_file,

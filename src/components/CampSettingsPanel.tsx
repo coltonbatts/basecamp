@@ -37,7 +37,7 @@ export function CampSettingsPanel(props: CampSettingsPanelProps) {
   return (
     <>
       <details className="camp-settings">
-        <summary>Settings</summary>
+        <summary>Camp Settings</summary>
         <div className="settings-grid">
           <label>
             <span>Name</span>
@@ -45,11 +45,11 @@ export function CampSettingsPanel(props: CampSettingsPanelProps) {
           </label>
 
           <label>
-            <span>Find Model</span>
+            <span>Search Model</span>
             <input
               value={props.draftModelQuery}
               onChange={(event) => props.onDraftModelQueryChange(event.target.value)}
-              placeholder="Search model"
+              placeholder="Search models"
             />
           </label>
 
@@ -68,7 +68,7 @@ export function CampSettingsPanel(props: CampSettingsPanelProps) {
           </label>
 
           <label className="settings-full settings-toggle">
-            <span>Enable Filesystem Tools (`context/` only)</span>
+            <span>Enable filesystem tools (`context/` only)</span>
             <input
               type="checkbox"
               checked={props.draftToolsEnabled}
@@ -98,7 +98,7 @@ export function CampSettingsPanel(props: CampSettingsPanelProps) {
       </details>
 
       <details className="artifact-drawer" open={props.selectedArtifactIds.length > 0}>
-        <summary>Supplies ({props.visibleArtifacts.length})</summary>
+        <summary>Artifacts ({props.visibleArtifacts.length})</summary>
         <label>
           <span>Search</span>
           <input
@@ -131,4 +131,3 @@ export function CampSettingsPanel(props: CampSettingsPanelProps) {
     </>
   );
 }
-

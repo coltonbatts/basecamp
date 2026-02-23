@@ -1,8 +1,16 @@
+@font-face {
+  font-family: 'Geist Pixel';
+  src: url('./assets/fonts/GeistPixel-Square.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
-  color-scheme: dark;
-  --bg: #030304;
-  --text: #f6f7f9;
-  font-family: 'Geist Pixel', 'Courier New', monospace;
+  color-scheme: light;
+  --bg: #f4f3ed;
+  --text: #1f1d18;
+  font-family: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
   background-color: var(--bg);
   color: var(--text);
 }
@@ -20,7 +28,7 @@ body,
 }
 
 body {
-  background: #030304;
+  background: var(--bg);
   color: var(--text);
 }
 

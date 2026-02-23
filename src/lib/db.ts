@@ -95,6 +95,14 @@ export async function getToolsEnabled(): Promise<boolean> {
   return invoke<boolean>('get_tools_enabled');
 }
 
+export async function setDefaultModel(model: string): Promise<void> {
+  await invoke('set_default_model', { model });
+}
+
+export async function getDefaultModel(): Promise<string | null> {
+  return invoke<string | null>('get_default_model');
+}
+
 export async function insertToolCallStart(payload: ToolCallStartPayload): Promise<string> {
   return invoke<string>('insert_tool_call_start', { payload });
 }
@@ -173,6 +181,18 @@ export async function campIncrementArtifactUsage(campId: string, artifactIds: st
 
 export async function campReadContextFile(campId: string, path: string): Promise<string> {
   return invoke<string>('tauri_cmd_read_context_file', { campId, path });
+}
+
+export async function workspaceListContextFiles(): Promise<string[]> {
+  return invoke<string[]>('workspace_list_context_files');
+}
+
+export async function campAttachWorkspaceContextFile(campId: string, path: string): Promise<void> {
+  await invoke('camp_attach_workspace_context_file', { campId, path });
+}
+
+export async function campDetachWorkspaceContextFile(campId: string, path: string): Promise<void> {
+  await invoke('camp_detach_workspace_context_file', { campId, path });
 }
 
 export async function campListContextFiles(campId: string, path?: string): Promise<string[]> {

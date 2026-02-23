@@ -22,7 +22,7 @@ function roleLabel(role: CampMessage['role']): string {
     return 'Tool';
   }
 
-  return 'Guide';
+  return 'Assistant';
 }
 
 export function TranscriptView(props: TranscriptViewProps) {
@@ -40,7 +40,7 @@ export function TranscriptView(props: TranscriptViewProps) {
                   onClick={() => props.onPromoteMessageToArtifact(message)}
                   disabled={!props.selectedCamp || props.isSending || props.promotingMessageId === message.id}
                 >
-                  {props.promotingMessageId === message.id ? 'Saving...' : 'Save Note'}
+                  {props.promotingMessageId === message.id ? 'Saving...' : 'Save Artifact'}
                 </button>
               ) : null}
             </div>
@@ -72,7 +72,7 @@ export function TranscriptView(props: TranscriptViewProps) {
       {props.streamingText ? (
         <article className="message message-assistant streaming">
           <header>
-            <span>Guide</span>
+            <span>Assistant</span>
             <time>streaming...</time>
           </header>
           <p>{props.streamingText}</p>
@@ -86,4 +86,3 @@ export function TranscriptView(props: TranscriptViewProps) {
     </div>
   );
 }
-
