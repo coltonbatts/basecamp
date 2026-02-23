@@ -156,6 +156,7 @@ export type CampConfig = {
   id: string;
   name: string;
   model: string;
+  tools_enabled: boolean;
   created_at: number;
   updated_at: number;
 };
@@ -170,10 +171,22 @@ export type CampSummary = {
 
 export type CampMessage = {
   id: string;
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   created_at: number;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: CampToolCall[];
   included_artifact_ids?: string[];
+};
+
+export type CampToolCall = {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
 };
 
 export type Camp = {
@@ -189,12 +202,14 @@ export type CampCreatePayload = {
   model: string;
   system_prompt: string;
   memory?: unknown;
+  tools_enabled?: boolean;
 };
 
 export type CampUpdateConfigPayload = {
   camp_id: string;
   name: string;
   model: string;
+  tools_enabled: boolean;
 };
 
 export type CampUpdateSystemPromptPayload = {
@@ -209,8 +224,11 @@ export type CampUpdateMemoryPayload = {
 
 export type CampAppendMessagePayload = {
   camp_id: string;
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: CampToolCall[];
   included_artifact_ids?: string[];
 };
 

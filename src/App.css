@@ -267,6 +267,17 @@ label span,
   grid-column: 1 / -1;
 }
 
+.settings-toggle {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.settings-toggle input[type='checkbox'] {
+  flex-shrink: 0;
+}
+
 .artifact-drawer label {
   margin-top: 0.45rem;
 }
@@ -326,6 +337,11 @@ label span,
 
 .message-assistant {
   background: rgba(15, 16, 20, 0.92);
+}
+
+.message-tool {
+  background: rgba(17, 22, 18, 0.92);
+  border-color: rgba(126, 170, 134, 0.35);
 }
 
 .message header {

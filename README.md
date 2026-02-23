@@ -67,6 +67,8 @@ Reference: [docs/v0.1-architecture.md](./docs/v0.1-architecture.md)
 
 ```bash
 npm install
+npm run test
+npm run lint
 npm run tauri dev
 ```
 

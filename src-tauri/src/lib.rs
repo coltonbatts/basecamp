@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Mutex,
 };
 
@@ -18,6 +18,7 @@ const KEYRING_ACCOUNT: &str = "openrouter_api_key";
 const DB_FILE_NAME: &str = "basecamp.db";
 const SETTING_WORKSPACE_PATH: &str = "workspace_path";
 const SETTING_TOOLS_ENABLED: &str = "tools_enabled";
+const LEGACY_CAMP_SCHEMA_VERSION: &str = "0.0";
 const CAMP_SCHEMA_VERSION: &str = "0.1";
 const CAMPS_DIR_NAME: &str = "camps";
 const CAMP_CONFIG_FILE: &str = "camp.json";
@@ -28,6 +29,8 @@ const CAMP_CONTEXT_DIR: &str = "context";
 const CAMP_ARTIFACTS_DIR: &str = "artifacts";
 const CAMP_ARTIFACTS_INDEX_FILE: &str = "index.json";
 const CAMP_ARTIFACTS_SCHEMA_VERSION: &str = "0.1";
+const DEFAULT_CAMP_NAME: &str = "Untitled Camp";
+const DEFAULT_CAMP_MODEL: &str = "openrouter/auto";
 
 struct AppState {
     connection: Mutex<Connection>,
@@ -106,8 +109,14 @@ struct CampConfig {
     id: String,
     name: String,
     model: String,
+    #[serde(default = "default_tools_enabled")]
+    tools_enabled: bool,
     created_at: i64,
     updated_at: i64,
+}
+
+fn default_tools_enabled() -> bool {
+    false
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,7 +135,27 @@ struct CampMessage {
     content: String,
     created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CampToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     included_artifact_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CampToolFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CampToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: CampToolFunction,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,6 +267,7 @@ struct CampCreatePayload {
     model: String,
     system_prompt: String,
     memory: Option<Value>,
+    tools_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +275,7 @@ struct CampUpdateConfigPayload {
     camp_id: String,
     name: String,
     model: String,
+    tools_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,6 +295,9 @@ struct CampAppendMessagePayload {
     camp_id: String,
     role: String,
     content: String,
+    name: Option<String>,
+    tool_call_id: Option<String>,
+    tool_calls: Option<Vec<CampToolCall>>,
     included_artifact_ids: Option<Vec<String>>,
 }
 
@@ -688,6 +722,98 @@ fn camp_artifacts_index_path(camp_dir: &Path) -> PathBuf {
     camp_artifacts_dir(camp_dir).join(CAMP_ARTIFACTS_INDEX_FILE)
 }
 
+fn validate_context_relative_path(
+    path: &str,
+    field_name: &str,
+    allow_empty: bool,
+) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        if allow_empty {
+            return Ok(PathBuf::new());
+        }
+        return Err(format!("{field_name} is required."));
+    }
+
+    let relative = PathBuf::from(trimmed);
+    if relative.is_absolute() {
+        return Err(format!("{field_name} must be a relative path."));
+    }
+
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(format!(
+                    "{field_name} must not contain traversal segments or absolute path markers."
+                ))
+            }
+        }
+    }
+
+    Ok(relative)
+}
+
+fn canonicalize_context_root(context_dir: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(context_dir)
+        .map_err(|err| format!("Unable to resolve camp context directory: {err}"))
+}
+
+fn ensure_path_within_root(root: &Path, target: &Path) -> Result<(), String> {
+    if target.starts_with(root) {
+        return Ok(());
+    }
+
+    Err("Path escapes the camp context directory.".to_string())
+}
+
+fn resolve_existing_context_target(
+    context_root: &Path,
+    relative_path: &str,
+    field_name: &str,
+    allow_empty: bool,
+) -> Result<PathBuf, String> {
+    let relative = validate_context_relative_path(relative_path, field_name, allow_empty)?;
+    let joined = context_root.join(relative);
+    let canonical_target =
+        fs::canonicalize(&joined).map_err(|err| format!("Unable to resolve path: {err}"))?;
+    ensure_path_within_root(context_root, &canonical_target)?;
+    Ok(canonical_target)
+}
+
+fn resolve_write_context_target(
+    context_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let relative = validate_context_relative_path(relative_path, "path", false)?;
+    let target = context_root.join(relative);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Invalid path; parent directory is missing.".to_string())?;
+
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("Unable to create parent directory: {err}"))?;
+
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|err| format!("Unable to resolve parent directory: {err}"))?;
+    ensure_path_within_root(context_root, &canonical_parent)?;
+
+    Ok(target)
+}
+
+fn to_context_relative_display(context_root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(context_root)
+        .map_err(|_| "Resolved path is not inside context root.".to_string())?;
+    let mut display = relative.to_string_lossy().replace('\\', "/");
+
+    if path.is_dir() && !display.is_empty() && !display.ends_with('/') {
+        display.push('/');
+    }
+
+    Ok(display)
+}
+
 fn validate_identifier(value: &str, field_name: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -839,7 +965,11 @@ fn parse_artifact_markdown(markdown: &str, fallback_title: &str) -> (String, Str
     if let Some(rest) = trimmed.strip_prefix("# ") {
         let mut lines = rest.lines();
         let title = lines.next().unwrap_or("").trim();
-        let body = lines.collect::<Vec<_>>().join("\n").trim_start().to_string();
+        let body = lines
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_start()
+            .to_string();
 
         if !title.is_empty() {
             return (title.to_string(), body);
@@ -877,6 +1007,469 @@ fn read_text_file(path: &Path) -> Result<String, String> {
         .map_err(|err| format!("Unable to read file {}: {err}", path.to_string_lossy()))
 }
 
+fn parse_non_empty_string_field(value: Option<&Value>) -> (Option<String>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+
+    match raw_value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return (None, true);
+            }
+
+            (Some(trimmed.to_string()), trimmed != text)
+        }
+        _ => (None, true),
+    }
+}
+
+fn parse_bool_field(value: Option<&Value>) -> (Option<bool>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+
+    if let Some(parsed) = raw_value.as_bool() {
+        return (Some(parsed), false);
+    }
+
+    if let Some(raw_text) = raw_value.as_str() {
+        let trimmed = raw_text.trim().to_lowercase();
+        if trimmed == "true" {
+            return (Some(true), true);
+        }
+        if trimmed == "false" {
+            return (Some(false), true);
+        }
+    }
+
+    (None, true)
+}
+
+fn normalize_timestamp_ms(timestamp: i64) -> i64 {
+    if (0..=9_999_999_999).contains(&timestamp) {
+        timestamp.saturating_mul(1_000)
+    } else {
+        timestamp
+    }
+}
+
+fn parse_timestamp_field(value: Option<&Value>) -> (Option<i64>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+
+    if let Some(parsed) = raw_value.as_i64() {
+        let normalized = normalize_timestamp_ms(parsed);
+        return (Some(normalized), normalized != parsed);
+    }
+
+    if let Some(parsed) = raw_value.as_u64() {
+        let Ok(parsed_i64) = i64::try_from(parsed) else {
+            return (None, true);
+        };
+
+        let normalized = normalize_timestamp_ms(parsed_i64);
+        return (Some(normalized), normalized != parsed_i64);
+    }
+
+    if let Some(parsed) = raw_value.as_f64() {
+        if !parsed.is_finite() || parsed.fract() != 0.0 {
+            return (None, true);
+        }
+
+        let parsed_i64 = parsed as i64;
+        let normalized = normalize_timestamp_ms(parsed_i64);
+        return (Some(normalized), true);
+    }
+
+    if let Some(raw_text) = raw_value.as_str() {
+        let trimmed = raw_text.trim();
+        if trimmed.is_empty() {
+            return (None, true);
+        }
+
+        if let Ok(parsed_i64) = trimmed.parse::<i64>() {
+            let normalized = normalize_timestamp_ms(parsed_i64);
+            return (Some(normalized), true);
+        }
+    }
+
+    (None, true)
+}
+
+fn parse_string_list_field(value: Option<&Value>) -> Option<Vec<String>> {
+    let array = value?.as_array()?;
+    let mut normalized = Vec::new();
+
+    for item in array {
+        let Some(text) = item.as_str() else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if !normalized.iter().any(|existing| existing == trimmed) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+
+    normalized.sort();
+
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn parse_message_content_field(value: Option<&Value>) -> Option<String> {
+    let raw_value = value?;
+
+    match raw_value {
+        Value::String(text) => Some(text.to_string()),
+        Value::Array(parts) => {
+            let mut normalized_parts = Vec::new();
+
+            for part in parts {
+                if let Some(text) = part.as_str() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        normalized_parts.push(trimmed.to_string());
+                    }
+                    continue;
+                }
+
+                if let Some(object) = part.as_object() {
+                    if let Some(text) = object.get("text").and_then(Value::as_str) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            normalized_parts.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+
+            if normalized_parts.is_empty() {
+                None
+            } else {
+                Some(normalized_parts.join("\n"))
+            }
+        }
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn normalize_loaded_transcript_role(role_value: &str) -> Option<String> {
+    let normalized = role_value.trim().to_lowercase();
+    match normalized.as_str() {
+        "system" => Some("system".to_string()),
+        "user" | "human" => Some("user".to_string()),
+        "assistant" | "model" | "bot" => Some("assistant".to_string()),
+        "tool" | "function" => Some("tool".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_tool_call_arguments(value: Option<&Value>) -> String {
+    let Some(raw_value) = value else {
+        return "{}".to_string();
+    };
+
+    match raw_value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                "{}".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        _ => serde_json::to_string(raw_value).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+fn parse_loaded_tool_calls(value: Option<&Value>, line_number: usize) -> Option<Vec<CampToolCall>> {
+    let raw_value = value?;
+    let raw_calls: Vec<&Value> = match raw_value {
+        Value::Array(values) => values.iter().collect(),
+        Value::Object(_) => vec![raw_value],
+        _ => return None,
+    };
+
+    let mut parsed_calls = Vec::new();
+    for (index, raw_call) in raw_calls.iter().enumerate() {
+        let Some(call_object) = raw_call.as_object() else {
+            continue;
+        };
+
+        let fallback_call_id = format!("legacy-tool-call-{}-{}", line_number + 1, index + 1);
+        let call_id = parse_non_empty_string_field(
+            call_object
+                .get("id")
+                .or_else(|| call_object.get("tool_call_id"))
+                .or_else(|| call_object.get("call_id")),
+        )
+        .0
+        .unwrap_or(fallback_call_id);
+
+        let function_object = call_object.get("function").and_then(Value::as_object);
+        let function_name = parse_non_empty_string_field(
+            function_object
+                .and_then(|function| function.get("name"))
+                .or_else(|| call_object.get("name")),
+        )
+        .0;
+
+        let Some(function_name) = function_name else {
+            continue;
+        };
+
+        let function_arguments = parse_tool_call_arguments(
+            function_object
+                .and_then(|function| function.get("arguments"))
+                .or_else(|| call_object.get("arguments")),
+        );
+
+        parsed_calls.push(CampToolCall {
+            id: call_id,
+            kind: "function".to_string(),
+            function: CampToolFunction {
+                name: function_name,
+                arguments: function_arguments,
+            },
+        });
+    }
+
+    if parsed_calls.is_empty() {
+        None
+    } else {
+        Some(parsed_calls)
+    }
+}
+
+fn parse_loaded_transcript_message(
+    value: &Value,
+    line_number: usize,
+) -> Result<CampMessage, String> {
+    let Some(message_object) = value.as_object() else {
+        return Err("Transcript entry must be a JSON object.".to_string());
+    };
+
+    let role_source = parse_non_empty_string_field(message_object.get("role"))
+        .0
+        .or_else(|| parse_non_empty_string_field(message_object.get("sender")).0)
+        .unwrap_or_else(|| {
+            if message_object.contains_key("tool_call_id")
+                || message_object.contains_key("tool_name")
+                || message_object.contains_key("call_id")
+            {
+                "tool".to_string()
+            } else {
+                "assistant".to_string()
+            }
+        });
+
+    let role = normalize_loaded_transcript_role(&role_source).ok_or_else(|| {
+        format!(
+            "Unsupported transcript role `{}` at line {}.",
+            role_source,
+            line_number + 1
+        )
+    })?;
+
+    let tool_calls = if role == "assistant" {
+        parse_loaded_tool_calls(message_object.get("tool_calls"), line_number)
+    } else {
+        None
+    };
+
+    let content = parse_message_content_field(message_object.get("content"))
+        .or_else(|| parse_message_content_field(message_object.get("message")))
+        .unwrap_or_default();
+    let trimmed_content = content.trim().to_string();
+    let normalized_content =
+        normalize_message_content(&role, &trimmed_content, tool_calls.is_some())
+            .unwrap_or(trimmed_content);
+
+    let message_id = parse_non_empty_string_field(message_object.get("id"))
+        .0
+        .or_else(|| parse_non_empty_string_field(message_object.get("message_id")).0)
+        .unwrap_or_else(|| format!("legacy-message-{}", line_number + 1));
+
+    let created_at = parse_timestamp_field(message_object.get("created_at"))
+        .0
+        .or_else(|| parse_timestamp_field(message_object.get("timestamp")).0)
+        .or_else(|| parse_timestamp_field(message_object.get("ts")).0)
+        .unwrap_or((line_number + 1) as i64);
+
+    let name = if role == "tool" {
+        parse_non_empty_string_field(
+            message_object
+                .get("name")
+                .or_else(|| message_object.get("tool_name")),
+        )
+        .0
+    } else {
+        None
+    };
+
+    let tool_call_id = if role == "tool" {
+        parse_non_empty_string_field(
+            message_object
+                .get("tool_call_id")
+                .or_else(|| message_object.get("call_id")),
+        )
+        .0
+    } else {
+        None
+    };
+
+    let included_artifact_ids = parse_string_list_field(
+        message_object
+            .get("included_artifact_ids")
+            .or_else(|| message_object.get("artifact_ids")),
+    );
+
+    Ok(CampMessage {
+        id: message_id,
+        role,
+        content: normalized_content,
+        created_at,
+        name,
+        tool_call_id,
+        tool_calls,
+        included_artifact_ids,
+    })
+}
+
+fn parse_camp_config_from_json(
+    camp_dir: &Path,
+    raw_value: Value,
+) -> Result<(CampConfig, bool), String> {
+    let Some(config_object) = raw_value.as_object() else {
+        return Err("camp.json must be a JSON object.".to_string());
+    };
+
+    let mut migrated = false;
+
+    let schema_version = parse_non_empty_string_field(config_object.get("schema_version")).0;
+    match schema_version.as_deref() {
+        Some(CAMP_SCHEMA_VERSION) => {}
+        Some(LEGACY_CAMP_SCHEMA_VERSION) | None => {
+            migrated = true;
+        }
+        Some(other) => {
+            return Err(format!(
+                "Unsupported camp schema_version `{other}`. Supported versions: {LEGACY_CAMP_SCHEMA_VERSION}, {CAMP_SCHEMA_VERSION}."
+            ));
+        }
+    }
+
+    let fallback_id = camp_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Unable to derive camp id from folder name.".to_string())
+        .and_then(validate_camp_identifier)?;
+
+    let (id_value, id_migrated) = parse_non_empty_string_field(config_object.get("id"));
+    migrated |= id_migrated;
+    let id = match id_value {
+        Some(raw_id) => {
+            let validated = validate_camp_identifier(&raw_id)?;
+            if validated != raw_id {
+                migrated = true;
+            }
+            validated
+        }
+        None => {
+            migrated = true;
+            fallback_id
+        }
+    };
+
+    let (name_value, name_migrated) = parse_non_empty_string_field(config_object.get("name"));
+    migrated |= name_migrated;
+    let name = match name_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            DEFAULT_CAMP_NAME.to_string()
+        }
+    };
+
+    let (model_value, model_migrated) = parse_non_empty_string_field(config_object.get("model"));
+    migrated |= model_migrated;
+    let model = match model_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            DEFAULT_CAMP_MODEL.to_string()
+        }
+    };
+
+    let (tools_enabled_value, tools_enabled_migrated) =
+        parse_bool_field(config_object.get("tools_enabled"));
+    migrated |= tools_enabled_migrated;
+    let tools_enabled = match tools_enabled_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            default_tools_enabled()
+        }
+    };
+
+    let (created_at_value, created_at_migrated) =
+        parse_timestamp_field(config_object.get("created_at"));
+    migrated |= created_at_migrated;
+    let (updated_at_value, updated_at_migrated) =
+        parse_timestamp_field(config_object.get("updated_at"));
+    migrated |= updated_at_migrated;
+
+    let now = now_timestamp_ms();
+    let created_at = match created_at_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            updated_at_value.unwrap_or(now)
+        }
+    };
+
+    let mut updated_at = match updated_at_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            created_at
+        }
+    };
+
+    if updated_at < created_at {
+        updated_at = created_at;
+        migrated = true;
+    }
+
+    Ok((
+        CampConfig {
+            schema_version: CAMP_SCHEMA_VERSION.to_string(),
+            id,
+            name,
+            model,
+            tools_enabled,
+            created_at,
+            updated_at,
+        },
+        migrated,
+    ))
+}
+
 fn read_transcript(path: &Path) -> Result<Vec<CampMessage>, String> {
     if !path.exists() {
         return Ok(vec![]);
@@ -886,15 +1479,27 @@ fn read_transcript(path: &Path) -> Result<Vec<CampMessage>, String> {
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
-    for line in reader.lines() {
-        let line = line.map_err(|err| format!("Unable to read transcript line: {err}"))?;
+    for (line_number, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|err| format!("Unable to read transcript line: {err}"))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let parsed: CampMessage = serde_json::from_str(trimmed)
-            .map_err(|err| format!("Unable to parse transcript entry: {err}"))?;
+        let parsed_value: Value = serde_json::from_str(trimmed).map_err(|err| {
+            format!(
+                "Unable to parse transcript entry at line {}: {err}",
+                line_number + 1
+            )
+        })?;
+
+        let parsed =
+            parse_loaded_transcript_message(&parsed_value, line_number).map_err(|err| {
+                format!(
+                    "Unable to normalize transcript entry at line {}: {err}",
+                    line_number + 1
+                )
+            })?;
         messages.push(parsed);
     }
 
@@ -916,7 +1521,26 @@ fn append_transcript_message(path: &Path, message: &CampMessage) -> Result<(), S
 }
 
 fn read_camp_config(camp_dir: &Path) -> Result<CampConfig, String> {
-    read_json_file(&camp_config_path(camp_dir))
+    let config_path = camp_config_path(camp_dir);
+    let raw = fs::read_to_string(&config_path).map_err(|err| {
+        format!(
+            "Unable to read file {}: {err}",
+            config_path.to_string_lossy()
+        )
+    })?;
+    let parsed_value: Value = serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "Unable to parse JSON {}: {err}",
+            config_path.to_string_lossy()
+        )
+    })?;
+
+    let (config, migrated) = parse_camp_config_from_json(camp_dir, parsed_value)?;
+    if migrated {
+        write_json_file(&config_path, &config)?;
+    }
+
+    Ok(config)
 }
 
 fn write_camp_config(camp_dir: &Path, config: &CampConfig) -> Result<(), String> {
@@ -940,12 +1564,100 @@ fn validate_non_empty(value: &str, field_name: &str) -> Result<String, String> {
 fn validate_camp_role(role: &str) -> Result<String, String> {
     let normalized = role.trim().to_lowercase();
     match normalized.as_str() {
-        "system" | "user" | "assistant" => Ok(normalized),
-        _ => Err("role must be one of: system, user, assistant.".to_string()),
+        "system" | "user" | "assistant" | "tool" => Ok(normalized),
+        _ => Err("role must be one of: system, user, assistant, tool.".to_string()),
     }
 }
 
-fn normalize_included_artifact_ids(artifact_ids: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {
+fn normalize_message_content(
+    role: &str,
+    content: &str,
+    has_tool_calls: bool,
+) -> Result<String, String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        if role == "assistant" && has_tool_calls {
+            return Ok(String::new());
+        }
+
+        return Err("content cannot be empty.".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn normalize_camp_tool_calls(
+    role: &str,
+    tool_calls: Option<Vec<CampToolCall>>,
+) -> Result<Option<Vec<CampToolCall>>, String> {
+    let Some(calls) = tool_calls else {
+        return Ok(None);
+    };
+
+    if role != "assistant" {
+        return Err("tool_calls are only allowed for assistant messages.".to_string());
+    }
+
+    if calls.is_empty() {
+        return Err("tool_calls cannot be empty when provided.".to_string());
+    }
+
+    let mut normalized = Vec::with_capacity(calls.len());
+    for call in calls {
+        let id = validate_non_empty(&call.id, "tool_call id")?;
+        if call.kind.trim() != "function" {
+            return Err("tool_call type must be function.".to_string());
+        }
+        let function_name = validate_non_empty(&call.function.name, "tool function name")?;
+        let function_arguments = call.function.arguments.trim();
+        if function_arguments.is_empty() {
+            return Err("tool function arguments must be a JSON string.".to_string());
+        }
+
+        normalized.push(CampToolCall {
+            id,
+            kind: "function".to_string(),
+            function: CampToolFunction {
+                name: function_name,
+                arguments: function_arguments.to_string(),
+            },
+        });
+    }
+
+    Ok(Some(normalized))
+}
+
+fn normalize_tool_message_name(role: &str, name: Option<String>) -> Result<Option<String>, String> {
+    if role != "tool" {
+        if name.is_some() {
+            return Err("name is only allowed for tool messages.".to_string());
+        }
+        return Ok(None);
+    }
+
+    let value = name.ok_or_else(|| "name is required for tool messages.".to_string())?;
+    Ok(Some(validate_non_empty(&value, "name")?))
+}
+
+fn normalize_tool_message_call_id(
+    role: &str,
+    tool_call_id: Option<String>,
+) -> Result<Option<String>, String> {
+    if role != "tool" {
+        if tool_call_id.is_some() {
+            return Err("tool_call_id is only allowed for tool messages.".to_string());
+        }
+        return Ok(None);
+    }
+
+    let value =
+        tool_call_id.ok_or_else(|| "tool_call_id is required for tool messages.".to_string())?;
+    Ok(Some(validate_non_empty(&value, "tool_call_id")?))
+}
+
+fn normalize_included_artifact_ids(
+    artifact_ids: Option<Vec<String>>,
+) -> Result<Option<Vec<String>>, String> {
     let Some(ids) = artifact_ids else {
         return Ok(None);
     };
@@ -1658,6 +2370,97 @@ fn write_note_to_workspace(
 }
 
 #[tauri::command]
+fn tauri_cmd_read_context_file(
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+) -> Result<String, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let target = resolve_existing_context_target(&context_root, &path, "path", false)?;
+
+    if !target.is_file() {
+        return Err("Requested path is not a file.".to_string());
+    }
+
+    read_text_file(&target)
+}
+
+#[tauri::command]
+fn tauri_cmd_list_context_files(
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: Option<String>,
+) -> Result<Vec<String>, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let path_value = path.unwrap_or_default();
+    let target_dir = resolve_existing_context_target(&context_root, &path_value, "path", true)?;
+
+    if !target_dir.is_dir() {
+        return Err("Requested path is not a directory.".to_string());
+    }
+
+    let mut entries = Vec::new();
+    for entry_result in fs::read_dir(&target_dir)
+        .map_err(|err| format!("Unable to list context directory: {err}"))?
+    {
+        let entry = entry_result.map_err(|err| format!("Unable to read context entry: {err}"))?;
+        let entry_path = entry.path();
+        let canonical_entry = fs::canonicalize(&entry_path)
+            .map_err(|err| format!("Unable to resolve context entry: {err}"))?;
+        ensure_path_within_root(&context_root, &canonical_entry)?;
+        let display = to_context_relative_display(&context_root, &canonical_entry)?;
+        if !display.is_empty() {
+            entries.push(display);
+        }
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
+#[tauri::command]
+fn tauri_cmd_write_context_file(
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let target = resolve_write_context_target(&context_root, &path)?;
+
+    if target.exists() {
+        let canonical_target = fs::canonicalize(&target)
+            .map_err(|err| format!("Unable to resolve destination path: {err}"))?;
+        ensure_path_within_root(&context_root, &canonical_target)?;
+        if canonical_target.is_dir() {
+            return Err("Requested path is a directory.".to_string());
+        }
+    }
+
+    fs::write(&target, content).map_err(|err| format!("Unable to write context file: {err}"))?;
+    touch_camp_updated_at(&camp_dir)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn camp_list(state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
     let connection = state
         .connection
@@ -1685,7 +2488,7 @@ fn camp_list(state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
             continue;
         }
 
-        let config: CampConfig = match read_json_file(&config_path) {
+        let config: CampConfig = match read_camp_config(&camp_dir) {
             Ok(config) => config,
             Err(_) => continue,
         };
@@ -1722,6 +2525,7 @@ fn camp_create(state: State<'_, AppState>, payload: CampCreatePayload) -> Result
         id: camp_id,
         name,
         model,
+        tools_enabled: payload.tools_enabled.unwrap_or(default_tools_enabled()),
         created_at: now,
         updated_at: now,
     };
@@ -1775,6 +2579,7 @@ fn camp_update_config(
     let mut config = read_camp_config(&camp_dir)?;
     config.name = validate_non_empty(&payload.name, "name")?;
     config.model = validate_non_empty(&payload.model, "model")?;
+    config.tools_enabled = payload.tools_enabled;
     config.updated_at = now_timestamp_ms();
 
     write_camp_config(&camp_dir, &config)
@@ -1826,7 +2631,10 @@ fn camp_append_message(
     let camp_dir = resolve_existing_camp_dir(&camps_root, &payload.camp_id)?;
 
     let role = validate_camp_role(&payload.role)?;
-    let content = validate_non_empty(&payload.content, "content")?;
+    let tool_calls = normalize_camp_tool_calls(&role, payload.tool_calls)?;
+    let content = normalize_message_content(&role, &payload.content, tool_calls.is_some())?;
+    let tool_name = normalize_tool_message_name(&role, payload.name)?;
+    let tool_call_id = normalize_tool_message_call_id(&role, payload.tool_call_id)?;
     let included_artifact_ids = normalize_included_artifact_ids(payload.included_artifact_ids)?;
     let included_artifact_ids = if role == "user" {
         included_artifact_ids
@@ -1838,6 +2646,9 @@ fn camp_append_message(
         role,
         content,
         created_at: now_timestamp_ms(),
+        name: tool_name,
+        tool_call_id,
+        tool_calls,
         included_artifact_ids,
     };
 
@@ -1903,7 +2714,9 @@ fn camp_create_artifact_from_message(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| extract_default_artifact_title(&source_message.content, &source_message.role));
+        .unwrap_or_else(|| {
+            extract_default_artifact_title(&source_message.content, &source_message.role)
+        });
     let title = validate_non_empty(&title, "title")?;
 
     let artifact_id = Uuid::new_v4().to_string();
@@ -2088,6 +2901,9 @@ pub fn run() {
             list_tool_calls_for_run,
             search_runs_db,
             write_note_to_workspace,
+            tauri_cmd_read_context_file,
+            tauri_cmd_list_context_files,
+            tauri_cmd_write_context_file,
             camp_list,
             camp_create,
             camp_load,
@@ -2111,6 +2927,11 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const LEGACY_CAMP_CONFIG_FIXTURE: &str =
+        include_str!("../tests/fixtures/camp_config_legacy_v0.json");
+    const LEGACY_TRANSCRIPT_FIXTURE: &str =
+        include_str!("../tests/fixtures/transcript_legacy_shapes.jsonl");
+
     fn make_temp_dir(prefix: &str) -> PathBuf {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2132,6 +2953,17 @@ mod tests {
         let resolved = resolve_note_path(&workspace, &filename);
 
         assert_eq!(resolved, workspace.join("today.md"));
+    }
+
+    #[test]
+    fn context_relative_paths_block_traversal_and_allow_nested_files() {
+        assert!(validate_context_relative_path("../escape.txt", "path", false).is_err());
+        assert!(validate_context_relative_path("/tmp/escape.txt", "path", false).is_err());
+        assert!(validate_context_relative_path("nested/../escape.txt", "path", false).is_err());
+
+        let valid = validate_context_relative_path("nested/file.txt", "path", false)
+            .expect("path should validate");
+        assert_eq!(valid, PathBuf::from("nested/file.txt"));
     }
 
     #[test]
@@ -2225,7 +3057,10 @@ mod tests {
 
         let loaded = ensure_artifacts_index(&camp_dir).expect("index should load");
         assert_eq!(loaded.artifacts.len(), 1);
-        assert_eq!(loaded.artifacts[0].tags, vec!["Alpha".to_string(), "beta".to_string()]);
+        assert_eq!(
+            loaded.artifacts[0].tags,
+            vec!["Alpha".to_string(), "beta".to_string()]
+        );
 
         let _ = fs::remove_dir_all(camp_dir);
     }
@@ -2235,8 +3070,7 @@ mod tests {
         let transcript_dir = make_temp_dir("basecamp-transcript");
         let transcript_path = transcript_dir.join(CAMP_TRANSCRIPT_FILE);
         let old_line = r#"{"id":"m1","role":"user","content":"legacy","created_at":1}"#;
-        let new_line =
-            r#"{"id":"m2","role":"user","content":"new","created_at":2,"included_artifact_ids":["a1","a2"]}"#;
+        let new_line = r#"{"id":"m2","role":"user","content":"new","created_at":2,"included_artifact_ids":["a1","a2"]}"#;
 
         fs::write(&transcript_path, format!("{old_line}\n{new_line}\n"))
             .expect("transcript should write");
@@ -2248,6 +3082,103 @@ mod tests {
             parsed[1].included_artifact_ids,
             Some(vec!["a1".to_string(), "a2".to_string()])
         );
+
+        let _ = fs::remove_dir_all(transcript_dir);
+    }
+
+    #[test]
+    fn read_camp_config_should_migrate_legacy_shape_and_persist_current_version() {
+        let camp_dir = make_temp_dir("basecamp-config-migrate");
+        fs::write(camp_config_path(&camp_dir), LEGACY_CAMP_CONFIG_FIXTURE)
+            .expect("legacy camp config fixture should write");
+
+        let loaded = read_camp_config(&camp_dir).expect("legacy config should load");
+        assert_eq!(loaded.schema_version, CAMP_SCHEMA_VERSION);
+        assert_eq!(loaded.id, "camp-legacy");
+        assert_eq!(loaded.name, "Legacy Camp");
+        assert_eq!(loaded.model, "openrouter/auto");
+        assert!(!loaded.tools_enabled);
+        assert_eq!(loaded.created_at, 1_700_000_000_000);
+        assert_eq!(loaded.updated_at, 1_700_000_001_000);
+
+        let persisted: CampConfig =
+            read_json_file(&camp_config_path(&camp_dir)).expect("migrated config should persist");
+        assert_eq!(persisted.schema_version, CAMP_SCHEMA_VERSION);
+        assert!(!persisted.tools_enabled);
+        assert_eq!(persisted.created_at, 1_700_000_000_000);
+        assert_eq!(persisted.updated_at, 1_700_000_001_000);
+
+        let _ = fs::remove_dir_all(camp_dir);
+    }
+
+    #[test]
+    fn read_camp_config_should_fail_for_unsupported_schema_version() {
+        let camp_dir = make_temp_dir("basecamp-config-unsupported");
+        fs::write(
+            camp_config_path(&camp_dir),
+            r#"{
+  "schema_version": "9.9",
+  "id": "camp-future",
+  "name": "Future",
+  "model": "openrouter/auto",
+  "tools_enabled": false,
+  "created_at": 1,
+  "updated_at": 1
+}"#,
+        )
+        .expect("unsupported config should write");
+
+        let error = read_camp_config(&camp_dir).expect_err("unsupported schema should fail");
+        assert!(error.contains("Unsupported camp schema_version"));
+
+        let _ = fs::remove_dir_all(camp_dir);
+    }
+
+    #[test]
+    fn transcript_read_should_parse_legacy_fixture_shapes() {
+        let transcript_dir = make_temp_dir("basecamp-transcript-fixture");
+        let transcript_path = transcript_dir.join(CAMP_TRANSCRIPT_FILE);
+        fs::write(&transcript_path, LEGACY_TRANSCRIPT_FIXTURE)
+            .expect("legacy transcript fixture should write");
+
+        let parsed = read_transcript(&transcript_path).expect("legacy transcript should parse");
+        assert_eq!(parsed.len(), 4);
+
+        assert_eq!(parsed[0].id, "legacy-message-1");
+        assert_eq!(parsed[0].role, "user");
+        assert_eq!(parsed[0].content, "legacy user message");
+        assert_eq!(parsed[0].created_at, 1_700_000_002_000);
+
+        assert_eq!(parsed[1].id, "assistant-1");
+        assert_eq!(parsed[1].role, "assistant");
+        assert_eq!(parsed[1].content, "let me check");
+        assert_eq!(parsed[1].created_at, 1_700_000_003_000);
+        assert_eq!(
+            parsed[1]
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls[0].id.as_str()),
+            Some("legacy-tool-call-2-1")
+        );
+        assert_eq!(
+            parsed[1]
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls[0].function.arguments.as_str()),
+            Some("{\"path\":\"README.md\"}")
+        );
+
+        assert_eq!(parsed[2].id, "legacy-message-3");
+        assert_eq!(parsed[2].role, "tool");
+        assert_eq!(parsed[2].name.as_deref(), Some("read_file"));
+        assert_eq!(parsed[2].tool_call_id.as_deref(), Some("call-xyz"));
+        assert_eq!(parsed[2].created_at, 1_700_000_004_000);
+
+        assert_eq!(
+            parsed[3].included_artifact_ids,
+            Some(vec!["a1".to_string(), "a2".to_string()])
+        );
+        assert_eq!(parsed[3].created_at, 1_700_000_005_000);
 
         let _ = fs::remove_dir_all(transcript_dir);
     }

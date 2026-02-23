@@ -112,6 +112,24 @@ export type OpenRouterChatRunResult = OpenRouterRunResult & {
   };
 };
 
+export type OpenRouterToolLoopExecutionInput = {
+  campId: string;
+  toolCall: OpenRouterToolCall & { id: string };
+};
+
+export type OpenRouterToolLoopOptions = {
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  executeToolCall: (input: OpenRouterToolLoopExecutionInput) => Promise<string>;
+  maxIterations?: number;
+};
+
+export type OpenRouterToolLoopResult = OpenRouterRunResult & {
+  transcriptMessages: OpenRouterChatMessage[];
+  requestPayloads: OpenRouterChatRequestPayload[];
+};
+
 export class OpenRouterRequestError extends Error {
   requestPayload: OpenRouterChatRequestPayload | OpenRouterRequestPayload;
   responsePayload: unknown;
@@ -174,6 +192,13 @@ function normalizeToolCallArguments(argumentsValue: unknown): string {
   } catch {
     return '{}';
   }
+}
+
+function normalizeToolCallIds(toolCalls: OpenRouterToolCall[], iteration: number): Array<OpenRouterToolCall & { id: string }> {
+  return toolCalls.map((toolCall, index) => ({
+    ...toolCall,
+    id: toolCall.id ?? `tool-call-${iteration}-${index}`,
+  }));
 }
 
 function parseToolCalls(rawToolCalls: unknown): OpenRouterToolCall[] {
@@ -300,6 +325,96 @@ export async function runOpenRouterCompletion(
     usage: completion.usage,
     resolvedModel: completion.resolvedModel,
   };
+}
+
+export async function runToolUseLoop(
+  campId: string,
+  messages: OpenRouterChatMessage[],
+  tools: OpenRouterToolSpec[],
+  apiKey: string,
+  onToken: (token: string) => void,
+  options: OpenRouterToolLoopOptions,
+): Promise<OpenRouterToolLoopResult> {
+  const requestPayloads: OpenRouterChatRequestPayload[] = [];
+  const transcriptMessages: OpenRouterChatMessage[] = [];
+  const conversationMessages: OpenRouterChatMessage[] = [...messages];
+  const maxIterations = options.maxIterations ?? 8;
+
+  let usage: TokenUsage = {
+    prompt_tokens: null,
+    completion_tokens: null,
+    total_tokens: null,
+  };
+  let resolvedModel: string | null = null;
+  let responsePayload: unknown = null;
+  let outputText = '';
+
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const requestPayload: OpenRouterChatRequestPayload = {
+      model: options.model,
+      messages: [...conversationMessages],
+      temperature: options.temperature,
+      max_tokens: options.max_tokens,
+      tools,
+      tool_choice: 'auto',
+    };
+    requestPayloads.push(requestPayload);
+
+    const completion = await runOpenRouterChatCompletion(apiKey, requestPayload);
+    responsePayload = completion.responsePayload;
+    usage = completion.usage;
+    resolvedModel = completion.resolvedModel ?? resolvedModel;
+
+    const normalizedToolCalls = normalizeToolCallIds(completion.assistantMessage.toolCalls, iteration);
+    const assistantText = normalizeMessageContent(completion.assistantMessage.content).trim();
+    const assistantConversationMessage: OpenRouterChatMessage = {
+      role: 'assistant',
+      content: completion.assistantMessage.content ?? assistantText,
+      tool_calls: normalizedToolCalls.length > 0 ? normalizedToolCalls : undefined,
+    };
+    const assistantTranscriptMessage: OpenRouterChatMessage = {
+      role: 'assistant',
+      content: assistantText,
+      tool_calls: normalizedToolCalls.length > 0 ? normalizedToolCalls : undefined,
+    };
+
+    conversationMessages.push(assistantConversationMessage);
+    transcriptMessages.push(assistantTranscriptMessage);
+
+    if (normalizedToolCalls.length === 0) {
+      outputText = assistantText;
+      if (outputText) {
+        onToken(outputText);
+      }
+
+      return {
+        responsePayload,
+        outputText,
+        usage,
+        resolvedModel,
+        transcriptMessages,
+        requestPayloads,
+      };
+    }
+
+    for (const toolCall of normalizedToolCalls) {
+      const toolResult = await options.executeToolCall({
+        campId,
+        toolCall,
+      });
+      const toolMessage: OpenRouterChatMessage = {
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: toolCall.function.name,
+        content: toolResult,
+      };
+
+      conversationMessages.push(toolMessage);
+      transcriptMessages.push(toolMessage);
+    }
+  }
+
+  throw new Error(`Tool-use loop exceeded ${maxIterations} iterations.`);
 }
 
 function parseOpenRouterErrorMessage(status: number, responsePayload: unknown): string {

@@ -170,3 +170,15 @@ export async function campToggleArtifactArchive(payload: CampToggleArtifactArchi
 export async function campIncrementArtifactUsage(campId: string, artifactIds: string[]): Promise<void> {
   await invoke('camp_increment_artifact_usage', { campId, artifactIds });
 }
+
+export async function campReadContextFile(campId: string, path: string): Promise<string> {
+  return invoke<string>('tauri_cmd_read_context_file', { campId, path });
+}
+
+export async function campListContextFiles(campId: string, path?: string): Promise<string[]> {
+  return invoke<string[]>('tauri_cmd_list_context_files', { campId, path });
+}
+
+export async function campWriteContextFile(campId: string, path: string, content: string): Promise<void> {
+  await invoke('tauri_cmd_write_context_file', { campId, path, content });
+}

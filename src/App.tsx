@@ -2,36 +2,39 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 
 import './App.css';
-import { composeCampOpenRouterRequest } from './lib/campRequest';
+import { CampSettingsPanel } from './components/CampSettingsPanel';
+import { TranscriptView } from './components/TranscriptView';
+import { useArtifactComposerState } from './hooks/useArtifactComposerState';
 import {
   campAppendMessage,
   campCreate,
   campCreateArtifactFromMessage,
   campGetArtifact,
   campIncrementArtifactUsage,
+  campListContextFiles,
   campList,
   campListArtifacts,
   campLoad,
+  campReadContextFile,
   campUpdateConfig,
   campUpdateMemory,
   campUpdateSystemPrompt,
+  campWriteContextFile,
   dbListModels,
   ensureDefaultWorkspace,
   getApiKey,
   pickWorkspaceFolder,
   setWorkspacePath,
 } from './lib/db';
+import { runCampChatRuntime } from './lib/campChatRuntime';
 import { syncModelsToDb } from './lib/models';
-import { OpenRouterRequestError, type OpenRouterChatRequestPayload, streamOpenRouterChatCompletion } from './lib/openrouter';
+import { OpenRouterRequestError, type OpenRouterChatRequestPayload } from './lib/openrouter';
+import { executeFilesystemToolCall, FILESYSTEM_TOOLS } from './lib/tools';
 import type { Camp, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from './lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_TEMPERATURE = 0.3;
-
-function formatDate(ts: number): string {
-  return new Date(ts).toLocaleString();
-}
 
 function prettyJson(value: unknown): string {
   try {
@@ -62,10 +65,6 @@ function computeProgressLabel(artifactCount: number): 'Basecamp' | 'Ridge' | 'Su
   return 'Basecamp';
 }
 
-function sortedUniqueIds(ids: string[]): string[] {
-  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort();
-}
-
 function modelDisplayLabel(model: ModelRow): string {
   if (model.name && model.name.trim()) {
     return `${model.name} (${model.id})`;
@@ -84,6 +83,7 @@ export default function App() {
 
   const [draftName, setDraftName] = useState('');
   const [draftModel, setDraftModel] = useState(FALLBACK_MODEL);
+  const [draftToolsEnabled, setDraftToolsEnabled] = useState(false);
   const [draftSystemPrompt, setDraftSystemPrompt] = useState('');
   const [draftMemory, setDraftMemory] = useState('{}');
 
@@ -91,8 +91,18 @@ export default function App() {
   const [newCampModel, setNewCampModel] = useState(FALLBACK_MODEL);
   const [newCampModelQuery, setNewCampModelQuery] = useState('');
   const [draftModelQuery, setDraftModelQuery] = useState('');
-  const [artifactQuery, setArtifactQuery] = useState('');
-  const [selectedArtifactIds, setSelectedArtifactIds] = useState<string[]>([]);
+  const {
+    artifactQuery,
+    setArtifactQuery,
+    selectedArtifactIds,
+    artifactById,
+    visibleArtifacts,
+    selectedArtifactsForComposer,
+    toggleArtifactSelection,
+    removeSelectedArtifact,
+    clearSelectedArtifacts,
+    pruneSelectedArtifacts,
+  } = useArtifactComposerState(artifacts);
 
   const [userMessage, setUserMessage] = useState('');
   const [temperature, setTemperature] = useState(DEFAULT_TEMPERATURE);
@@ -134,33 +144,6 @@ export default function App() {
   }, [modelOptionsWithLabels, draftModelQuery]);
   const selectedDraftModel = modelById.get(draftModel) ?? null;
 
-  const artifactById = useMemo(() => {
-    return new Map(artifacts.map((artifact) => [artifact.id, artifact]));
-  }, [artifacts]);
-
-  const visibleArtifacts = useMemo(() => {
-    const normalizedQuery = artifactQuery.trim().toLowerCase();
-    return artifacts
-      .filter((artifact) => !artifact.archived)
-      .filter((artifact) => {
-        if (!normalizedQuery) {
-          return true;
-        }
-
-        return (
-          artifact.title.toLowerCase().includes(normalizedQuery) ||
-          artifact.tags.some((tag) => tag.toLowerCase().includes(normalizedQuery))
-        );
-      })
-      .sort((left, right) => right.updated_at - left.updated_at);
-  }, [artifactQuery, artifacts]);
-
-  const selectedArtifactsForComposer = useMemo(() => {
-    return selectedArtifactIds
-      .map((artifactId) => artifactById.get(artifactId))
-      .filter((artifact): artifact is CampArtifactMetadata => Boolean(artifact));
-  }, [artifactById, selectedArtifactIds]);
-
   const artifactCount = artifacts.length;
   const reusedArtifactCount = artifacts.filter((artifact) => artifact.usage_count > 0).length;
   const conversationTurnCount = selectedCamp?.transcript.filter((message) => message.role === 'user').length ?? 0;
@@ -187,8 +170,8 @@ export default function App() {
   const loadArtifacts = useCallback(async (campId: string) => {
     const rows = await campListArtifacts(campId);
     setArtifacts(rows);
-    setSelectedArtifactIds((previous) => previous.filter((artifactId) => rows.some((artifact) => artifact.id === artifactId)));
-  }, []);
+    pruneSelectedArtifacts(rows.map((artifact) => artifact.id));
+  }, [pruneSelectedArtifacts]);
 
   const loadSelectedCamp = useCallback(
     async (campId: string) => {
@@ -197,12 +180,13 @@ export default function App() {
       setArtifacts(artifactRows);
       setDraftName(camp.config.name);
       setDraftModel(camp.config.model);
+      setDraftToolsEnabled(camp.config.tools_enabled);
       setDraftModelQuery('');
       setDraftSystemPrompt(camp.system_prompt);
       setDraftMemory(prettyJson(camp.memory));
-      setSelectedArtifactIds([]);
+      clearSelectedArtifacts();
     },
-    [],
+    [clearSelectedArtifacts],
   );
 
   useEffect(() => {
@@ -236,14 +220,14 @@ export default function App() {
     if (!selectedCampId) {
       setSelectedCamp(null);
       setArtifacts([]);
-      setSelectedArtifactIds([]);
+      clearSelectedArtifacts();
       return;
     }
 
     void loadSelectedCamp(selectedCampId).catch((loadError) => {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load camp.');
     });
-  }, [selectedCampId, loadSelectedCamp]);
+  }, [clearSelectedArtifacts, selectedCampId, loadSelectedCamp]);
 
   const handlePickWorkspace = async () => {
     setError(null);
@@ -294,6 +278,7 @@ export default function App() {
         model: newCampModel || modelOptions[0] || FALLBACK_MODEL,
         system_prompt: '',
         memory: {},
+        tools_enabled: false,
       });
 
       setNewCampName('New Camp');
@@ -327,6 +312,7 @@ export default function App() {
       camp_id: selectedCampId,
       name: draftName,
       model: draftModel,
+      tools_enabled: draftToolsEnabled,
     });
 
     await campUpdateSystemPrompt({
@@ -345,7 +331,7 @@ export default function App() {
     await loadCamps();
 
     return refreshedCamp;
-  }, [draftMemory, draftModel, draftName, draftSystemPrompt, loadCamps, selectedCampId]);
+  }, [draftMemory, draftModel, draftName, draftSystemPrompt, draftToolsEnabled, loadCamps, selectedCampId]);
 
   const handleSaveCamp = async () => {
     setIsSaving(true);
@@ -407,16 +393,6 @@ export default function App() {
     }
   };
 
-  const handleToggleArtifactSelection = (artifactId: string) => {
-    setSelectedArtifactIds((previous) =>
-      previous.includes(artifactId) ? previous.filter((id) => id !== artifactId) : sortedUniqueIds([...previous, artifactId]),
-    );
-  };
-
-  const handleRemoveSelectedArtifact = (artifactId: string) => {
-    setSelectedArtifactIds((previous) => previous.filter((id) => id !== artifactId));
-  };
-
   const handleSendMessage = async (event: FormEvent) => {
     event.preventDefault();
 
@@ -430,7 +406,7 @@ export default function App() {
       return;
     }
 
-    const messageArtifactIds = sortedUniqueIds(selectedArtifactIds);
+    const messageArtifactIds = [...new Set(selectedArtifactIds)].sort();
 
     setIsSending(true);
     setStreamingText('');
@@ -462,38 +438,46 @@ export default function App() {
       ]);
       setSelectedCamp(campWithUser);
 
-      const requestPayload = composeCampOpenRouterRequest({
+      const runtimeResult = await runCampChatRuntime({
+        campId: selectedCampId,
         camp: campWithUser,
         selectedArtifacts,
-        userMessage: '',
+        apiKey,
         temperature,
         maxTokens,
+        onToken: (token) => {
+          setStreamingText((previous) => previous + token);
+        },
+        tools: FILESYSTEM_TOOLS,
+        executeToolCall: async ({ campId, toolCall }) => {
+          return executeFilesystemToolCall(toolCall, {
+            readFile: async (path) => campReadContextFile(campId, path),
+            listFiles: async (path) => campListContextFiles(campId, path),
+            writeFile: async (path, content) => campWriteContextFile(campId, path, content),
+          });
+        },
       });
+      setLastRequestPreview(runtimeResult.requestPayload);
 
-      setLastRequestPreview(requestPayload);
-
-      const streamed = await streamOpenRouterChatCompletion(apiKey, requestPayload, (token) => {
-        setStreamingText((previous) => previous + token);
-      });
-
-      if (!streamed.outputText.trim()) {
-        throw new Error('Model returned an empty response.');
+      for (const message of runtimeResult.transcriptMessages) {
+        await campAppendMessage({
+          camp_id: selectedCampId,
+          ...message,
+        });
       }
-
-      await campAppendMessage({
-        camp_id: selectedCampId,
-        role: 'assistant',
-        content: streamed.outputText,
-      });
 
       const updatedCamp = await campLoad(selectedCampId);
       setSelectedCamp(updatedCamp);
       await Promise.all([loadCamps(), loadArtifacts(selectedCampId)]);
 
       setUserMessage('');
-      setSelectedArtifactIds([]);
+      clearSelectedArtifacts();
       setStreamingText('');
-      setStatus('Response streamed and saved to transcript.jsonl');
+      setStatus(
+        runtimeResult.usingTools
+          ? 'Response completed with tool use and saved to transcript.jsonl'
+          : 'Response streamed and saved to transcript.jsonl',
+      );
     } catch (sendError) {
       if (sendError instanceof OpenRouterRequestError) {
         setError(sendError.message);
@@ -626,135 +610,41 @@ export default function App() {
           </div>
 
           {selectedCamp ? (
-            <>
-              <details className="camp-settings">
-                <summary>Settings</summary>
-                <div className="settings-grid">
-                  <label>
-                    <span>Name</span>
-                    <input value={draftName} onChange={(event) => setDraftName(event.target.value)} />
-                  </label>
-
-                  <label>
-                    <span>Find Model</span>
-                    <input
-                      value={draftModelQuery}
-                      onChange={(event) => setDraftModelQuery(event.target.value)}
-                      placeholder="Search model"
-                    />
-                  </label>
-
-                  <label>
-                    <span>Model</span>
-                    <select value={draftModel} onChange={(event) => setDraftModel(event.target.value)}>
-                      {(filteredDraftModelOptions.length > 0 ? filteredDraftModelOptions : modelOptionsWithLabels).map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <label className="settings-full">
-                    <span>System Prompt</span>
-                    <textarea
-                      value={draftSystemPrompt}
-                      onChange={(event) => setDraftSystemPrompt(event.target.value)}
-                      rows={4}
-                    />
-                  </label>
-
-                  <label className="settings-full">
-                    <span>Memory JSON</span>
-                    <textarea value={draftMemory} onChange={(event) => setDraftMemory(event.target.value)} rows={4} />
-                  </label>
-                </div>
-
-                <p className="hint">
-                  {selectedDraftModel?.context_length ? `Context ${selectedDraftModel.context_length} • ` : ''}
-                  {activeCampSummary?.path ?? '-'}
-                </p>
-              </details>
-
-              <details className="artifact-drawer" open={selectedArtifactIds.length > 0}>
-                <summary>Supplies ({visibleArtifacts.length})</summary>
-                <label>
-                  <span>Search</span>
-                  <input
-                    value={artifactQuery}
-                    onChange={(event) => setArtifactQuery(event.target.value)}
-                    placeholder="title or tag"
-                  />
-                </label>
-
-                <div className="artifact-scroll">
-                  {visibleArtifacts.map((artifact) => (
-                    <article key={artifact.id} className="artifact-item">
-                      <header>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={selectedArtifactIds.includes(artifact.id)}
-                            onChange={() => handleToggleArtifactSelection(artifact.id)}
-                          />
-                          <strong>{artifact.title}</strong>
-                        </label>
-                        <time>{formatDate(artifact.updated_at)}</time>
-                      </header>
-                      <p>{artifact.tags.join(', ')}</p>
-                    </article>
-                  ))}
-                  {visibleArtifacts.length === 0 ? <p className="hint">No artifacts yet.</p> : null}
-                </div>
-              </details>
-            </>
+            <CampSettingsPanel
+              draftName={draftName}
+              onDraftNameChange={setDraftName}
+              draftModelQuery={draftModelQuery}
+              onDraftModelQueryChange={setDraftModelQuery}
+              draftModel={draftModel}
+              onDraftModelChange={setDraftModel}
+              filteredDraftModelOptions={filteredDraftModelOptions}
+              modelOptionsWithLabels={modelOptionsWithLabels}
+              draftToolsEnabled={draftToolsEnabled}
+              onDraftToolsEnabledChange={setDraftToolsEnabled}
+              draftSystemPrompt={draftSystemPrompt}
+              onDraftSystemPromptChange={setDraftSystemPrompt}
+              draftMemory={draftMemory}
+              onDraftMemoryChange={setDraftMemory}
+              selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
+              activeCampPath={activeCampSummary?.path ?? null}
+              selectedArtifactIds={selectedArtifactIds}
+              artifactQuery={artifactQuery}
+              onArtifactQueryChange={setArtifactQuery}
+              visibleArtifacts={visibleArtifacts}
+              onToggleArtifactSelection={toggleArtifactSelection}
+            />
           ) : null}
 
-          <div className="transcript-scroll">
-            {selectedCamp?.transcript.map((message) => (
-              <article key={message.id} className={`message message-${message.role}`}>
-                <header>
-                  <span>{message.role === 'user' ? 'You' : 'Guide'}</span>
-                  <div className="message-actions">
-                    <time>{formatDate(message.created_at)}</time>
-                    <button
-                      type="button"
-                      onClick={() => handlePromoteMessageToArtifact(message)}
-                      disabled={!selectedCamp || isSending || promotingMessageId === message.id}
-                    >
-                      {promotingMessageId === message.id ? 'Saving...' : 'Save Note'}
-                    </button>
-                  </div>
-                </header>
-                <p>{message.content}</p>
-                {message.included_artifact_ids && message.included_artifact_ids.length > 0 ? (
-                  <div className="artifact-chip-row">
-                    {message.included_artifact_ids.map((artifactId) => {
-                      const artifact = artifactById.get(artifactId);
-                      return (
-                        <span key={`${message.id}-${artifactId}`} className="artifact-chip">
-                          {artifact?.title ?? artifactId}
-                        </span>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </article>
-            ))}
-
-            {streamingText ? (
-              <article className="message message-assistant streaming">
-                <header>
-                  <span>Guide</span>
-                  <time>streaming...</time>
-                </header>
-                <p>{streamingText}</p>
-              </article>
-            ) : null}
-
-            {!selectedCamp ? <p className="hint">Pick a camp and send your first message.</p> : null}
-            {selectedCamp && !selectedCamp.transcript.length && !streamingText ? <p className="hint">No messages yet.</p> : null}
-          </div>
+          <TranscriptView
+            selectedCamp={selectedCamp}
+            streamingText={streamingText}
+            artifactById={artifactById}
+            isSending={isSending}
+            promotingMessageId={promotingMessageId}
+            onPromoteMessageToArtifact={(message) => {
+              void handlePromoteMessageToArtifact(message);
+            }}
+          />
 
           <form className="composer" onSubmit={handleSendMessage}>
             {selectedArtifactsForComposer.length > 0 ? (
@@ -764,7 +654,7 @@ export default function App() {
                     type="button"
                     key={`pending-${artifact.id}`}
                     className="artifact-chip selectable"
-                    onClick={() => handleRemoveSelectedArtifact(artifact.id)}
+                    onClick={() => removeSelectedArtifact(artifact.id)}
                   >
                     {artifact.title}
                   </button>
