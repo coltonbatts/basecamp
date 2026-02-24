@@ -61,11 +61,9 @@ function campPreview(camp: Camp): string {
 }
 
 function modelDisplayLabel(model: ModelRow): string {
-  if (model.name && model.name.trim()) {
-    return `${model.name} (${model.id})`;
-  }
-
-  return model.id;
+  const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
+  const name = model.name?.trim() ? model.name : model.id;
+  return `${name}${ctx}`;
 }
 
 export function HomeView() {
@@ -234,9 +232,14 @@ export function HomeView() {
           <h1>Basecamp</h1>
           <p>{workspacePath ?? 'Loading workspace...'}</p>
         </div>
-        <button type="button" onClick={handleRefreshModels} disabled={isRefreshingModels || isBooting}>
-          {isRefreshingModels ? 'Refreshing Models' : 'Refresh Models'}
-        </button>
+        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <button type="button" onClick={() => navigate('/arena')}>
+            Arena
+          </button>
+          <button type="button" onClick={handleRefreshModels} disabled={isRefreshingModels || isBooting}>
+            {isRefreshingModels ? 'Refreshing Models' : 'Refresh Models'}
+          </button>
+        </div>
       </header>
 
       {status ? <p className="status-line">{status}</p> : null}

@@ -17,6 +17,10 @@ A **Camp** is a persistent local project folder containing:
 
 All Camp state is visible on disk.
 
+## Arena View
+
+The Arena is an ephemeral mode to run a single prompt against up to 4 different models concurrently. It features real-time parallel streaming and latency timers to help you explore and benchmark models easily.
+
 ## Local File Layout
 
 Workspace root:

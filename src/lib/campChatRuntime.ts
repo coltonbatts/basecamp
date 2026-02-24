@@ -7,7 +7,7 @@ import {
   type OpenRouterToolLoopExecutionInput,
   type OpenRouterToolSpec,
 } from './openrouter';
-import type { Camp, CampAppendMessagePayload, CampArtifact, CampToolCall } from './types';
+import type { Camp, CampAppendMessagePayload, CampArtifact, CampToolCall, TokenUsage } from './types';
 
 export type CampRuntimeTranscriptPayload = Omit<CampAppendMessagePayload, 'camp_id' | 'included_artifact_ids'>;
 
@@ -29,6 +29,8 @@ export type RunCampChatRuntimeResult = {
   requestPayloads: OpenRouterChatRequestPayload[];
   transcriptMessages: CampRuntimeTranscriptPayload[];
   usingTools: boolean;
+  usage?: TokenUsage;
+  resolvedModel: string | null;
 };
 
 function messageContentToString(content: OpenRouterChatMessage['content']): string {
@@ -157,6 +159,8 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
       requestPayloads: looped.requestPayloads,
       transcriptMessages: normalizeLoopTranscriptMessages(looped.transcriptMessages),
       usingTools: true,
+      usage: looped.usage,
+      resolvedModel: looped.resolvedModel,
     };
   }
 
@@ -174,6 +178,8 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
       },
     ],
     usingTools: false,
+    usage: streamed.usage,
+    resolvedModel: streamed.resolvedModel,
   };
 }
 

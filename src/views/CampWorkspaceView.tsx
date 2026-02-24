@@ -58,11 +58,79 @@ function parseJsonInput(raw: string): unknown {
 }
 
 function modelDisplayLabel(model: ModelRow): string {
-  if (model.name && model.name.trim()) {
-    return `${model.name} (${model.id})`;
+  const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
+  const name = model.name?.trim() ? model.name : model.id;
+  return `${name}${ctx}`;
+}
+
+type ContextTreeNode = {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file';
+  children: ContextTreeNode[];
+};
+
+type MutableContextTreeNode = {
+  name: string;
+  path: string;
+  kind: 'dir' | 'file';
+  children: Map<string, MutableContextTreeNode>;
+};
+
+function buildContextTree(paths: string[]): ContextTreeNode[] {
+  const root = new Map<string, MutableContextTreeNode>();
+
+  for (const rawPath of paths) {
+    const normalized = rawPath.trim().replace(/^\/+|\/+$/g, '');
+    if (!normalized) {
+      continue;
+    }
+
+    const segments = normalized.split('/').filter(Boolean);
+    let currentPath = '';
+    let cursor = root;
+
+    segments.forEach((segment, index) => {
+      const isLeaf = index === segments.length - 1;
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      const nodePath = isLeaf ? currentPath : `${currentPath}/`;
+      const key = `${isLeaf ? 'f' : 'd'}:${segment}`;
+      const existing = cursor.get(key);
+
+      if (existing) {
+        cursor = existing.children;
+        return;
+      }
+
+      const nextNode: MutableContextTreeNode = {
+        name: segment,
+        path: nodePath,
+        kind: isLeaf ? 'file' : 'dir',
+        children: new Map<string, MutableContextTreeNode>(),
+      };
+      cursor.set(key, nextNode);
+      cursor = nextNode.children;
+    });
   }
 
-  return model.id;
+  const freeze = (nodes: Map<string, MutableContextTreeNode>): ContextTreeNode[] => {
+    return [...nodes.values()]
+      .sort((left, right) => {
+        if (left.kind !== right.kind) {
+          return left.kind === 'dir' ? -1 : 1;
+        }
+
+        return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+      })
+      .map((node) => ({
+        name: node.name,
+        path: node.path,
+        kind: node.kind,
+        children: freeze(node.children),
+      }));
+  };
+
+  return freeze(root);
 }
 
 export function CampWorkspaceView() {
@@ -104,6 +172,9 @@ export function CampWorkspaceView() {
   const [temperature, setTemperature] = useState(DEFAULT_TEMPERATURE);
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS);
 
+  const [sessionTokens, setSessionTokens] = useState<number>(0);
+  const [resolvedModel, setResolvedModel] = useState<string | null>(null);
+
   const [streamingText, setStreamingText] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -114,6 +185,13 @@ export function CampWorkspaceView() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastRequestPreview, setLastRequestPreview] = useState<OpenRouterChatRequestPayload | null>(null);
+  const [contextTreeQuery, setContextTreeQuery] = useState('');
+  const [selectedContextFilePath, setSelectedContextFilePath] = useState<string | null>(null);
+  const [selectedContextFileContent, setSelectedContextFileContent] = useState('');
+  const [contextFileDraft, setContextFileDraft] = useState('');
+  const [isLoadingContextFile, setIsLoadingContextFile] = useState(false);
+  const [isSavingContextFile, setIsSavingContextFile] = useState(false);
+  const [collapsedContextDirs, setCollapsedContextDirs] = useState<string[]>([]);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const modelOptions = useMemo(
@@ -144,6 +222,17 @@ export function CampWorkspaceView() {
   const selectedDraftModel = modelById.get(draftModel) ?? null;
 
   const activeCampSummary = camps.find((camp) => camp.id === selectedCampId) ?? null;
+  const filteredContextFiles = useMemo(() => {
+    const query = contextTreeQuery.trim().toLowerCase();
+    if (!query) {
+      return attachedContextFiles;
+    }
+
+    return attachedContextFiles.filter((path) => path.toLowerCase().includes(query));
+  }, [attachedContextFiles, contextTreeQuery]);
+  const contextTree = useMemo(() => buildContextTree(filteredContextFiles), [filteredContextFiles]);
+  const collapsedContextDirSet = useMemo(() => new Set(collapsedContextDirs), [collapsedContextDirs]);
+  const contextFileDirty = selectedContextFilePath ? contextFileDraft !== selectedContextFileContent : false;
 
   const loadModels = useCallback(async () => {
     const rows = await dbListModels();
@@ -277,8 +366,13 @@ export function CampWorkspaceView() {
       setArtifacts([]);
       setAttachedContextFiles([]);
       clearSelectedArtifacts();
+      setSessionTokens(0);
+      setResolvedModel(null);
       return;
     }
+
+    setSessionTokens(0);
+    setResolvedModel(null);
 
     void loadSelectedCamp(selectedCampId).catch((loadError) => {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load camp.');
@@ -292,6 +386,70 @@ export function CampWorkspaceView() {
 
     composerTextareaRef.current?.focus();
   }, [isSending, selectedCampId]);
+
+  useEffect(() => {
+    if (!selectedCampId) {
+      setSelectedContextFilePath(null);
+      setSelectedContextFileContent('');
+      setContextFileDraft('');
+      setCollapsedContextDirs([]);
+      return;
+    }
+
+    if (attachedContextFiles.length === 0) {
+      setSelectedContextFilePath(null);
+      setSelectedContextFileContent('');
+      setContextFileDraft('');
+      return;
+    }
+
+    if (selectedContextFilePath && attachedContextFiles.includes(selectedContextFilePath)) {
+      return;
+    }
+
+    setSelectedContextFilePath(attachedContextFiles[0] ?? null);
+  }, [attachedContextFiles, selectedCampId, selectedContextFilePath]);
+
+  useEffect(() => {
+    if (!selectedCampId || !selectedContextFilePath) {
+      setSelectedContextFileContent('');
+      setContextFileDraft('');
+      return;
+    }
+
+    let ignore = false;
+    setIsLoadingContextFile(true);
+    setError(null);
+
+    void campReadContextFile(selectedCampId, selectedContextFilePath)
+      .then((content) => {
+        if (ignore) {
+          return;
+        }
+
+        setSelectedContextFileContent(content);
+        setContextFileDraft(content);
+      })
+      .catch((contextReadError) => {
+        if (ignore) {
+          return;
+        }
+
+        setSelectedContextFileContent('');
+        setContextFileDraft('');
+        setError(contextReadError instanceof Error ? contextReadError.message : 'Unable to load context file.');
+      })
+      .finally(() => {
+        if (ignore) {
+          return;
+        }
+        setIsLoadingContextFile(false);
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [selectedCampId, selectedContextFilePath]);
 
   const handlePickWorkspace = async () => {
     setError(null);
@@ -517,6 +675,37 @@ export function CampWorkspaceView() {
     }
   };
 
+  const handleToggleContextDir = (path: string) => {
+    setCollapsedContextDirs((previous) => {
+      if (previous.includes(path)) {
+        return previous.filter((entry) => entry !== path);
+      }
+
+      return [...previous, path];
+    });
+  };
+
+  const handleSaveContextFile = async () => {
+    if (!selectedCampId || !selectedContextFilePath) {
+      return;
+    }
+
+    setIsSavingContextFile(true);
+    setError(null);
+    setStatus(null);
+
+    try {
+      await campWriteContextFile(selectedCampId, selectedContextFilePath, contextFileDraft);
+      setSelectedContextFileContent(contextFileDraft);
+      await loadCamps();
+      setStatus(`Saved ${selectedContextFilePath}`);
+    } catch (contextWriteError) {
+      setError(contextWriteError instanceof Error ? contextWriteError.message : 'Unable to save context file.');
+    } finally {
+      setIsSavingContextFile(false);
+    }
+  };
+
   const handlePromoteMessageToArtifact = async (message: CampMessage) => {
     if (!selectedCampId) {
       return;
@@ -586,26 +775,34 @@ export function CampWorkspaceView() {
       ]);
       setSelectedCamp(campWithUser);
 
-      const runtimeResult = await runCampChatRuntime({
-        campId: selectedCampId,
-        camp: campWithUser,
-        selectedArtifacts,
-        apiKey,
-        temperature,
-        maxTokens,
-        onToken: (token) => {
-          setStreamingText((previous) => previous + token);
-        },
-        tools: FILESYSTEM_TOOLS,
-        executeToolCall: async ({ campId, toolCall }) => {
-          return executeFilesystemToolCall(toolCall, {
-            readFile: async (path) => campReadContextFile(campId, path),
-            listFiles: async (path) => campListContextFiles(campId, path),
-            writeFile: async (path, content) => campWriteContextFile(campId, path, content),
-          });
-        },
-      });
+      const runRuntime = (campForRuntime: Camp) =>
+        runCampChatRuntime({
+          campId: selectedCampId,
+          camp: campForRuntime,
+          selectedArtifacts,
+          apiKey,
+          temperature,
+          maxTokens,
+          onToken: (token) => {
+            setStreamingText((previous) => previous + token);
+          },
+          tools: FILESYSTEM_TOOLS,
+          executeToolCall: async ({ campId, toolCall }) => {
+            return executeFilesystemToolCall(toolCall, {
+              readFile: async (path) => campReadContextFile(campId, path),
+              listFiles: async (path) => campListContextFiles(campId, path),
+              writeFile: async (path, content) => campWriteContextFile(campId, path, content),
+            });
+          },
+        });
+
+      const runtimeResult = await runRuntime(campWithUser);
       setLastRequestPreview(runtimeResult.requestPayload);
+
+      if (runtimeResult.usage?.total_tokens) {
+        setSessionTokens((prev) => prev + (runtimeResult.usage?.total_tokens ?? 0));
+      }
+      setResolvedModel(runtimeResult.resolvedModel);
 
       for (const message of runtimeResult.transcriptMessages) {
         await campAppendMessage({
@@ -616,7 +813,12 @@ export function CampWorkspaceView() {
 
       const updatedCamp = await campLoad(selectedCampId);
       setSelectedCamp(updatedCamp);
-      await Promise.all([loadCamps(), loadArtifacts(selectedCampId)]);
+      const [, , refreshedContextFiles] = await Promise.all([
+        loadCamps(),
+        loadArtifacts(selectedCampId),
+        loadCampContextFiles(selectedCampId),
+      ]);
+      setAttachedContextFiles(refreshedContextFiles);
 
       setUserMessage('');
       clearSelectedArtifacts();
@@ -628,7 +830,8 @@ export function CampWorkspaceView() {
       );
     } catch (sendError) {
       if (sendError instanceof OpenRouterRequestError) {
-        setError(sendError.message);
+        setLastRequestPreview(sendError.requestPayload as OpenRouterChatRequestPayload);
+        setError(`${sendError.message} (model: ${sendError.requestPayload.model})`);
       } else {
         setError(sendError instanceof Error ? sendError.message : 'Unable to send message.');
       }
@@ -644,6 +847,42 @@ export function CampWorkspaceView() {
     }
   };
 
+  const renderContextTree = (nodes: ContextTreeNode[], depth = 0) => {
+    return nodes.map((node) => {
+      if (node.kind === 'dir') {
+        const collapsed = collapsedContextDirSet.has(node.path);
+
+        return (
+          <div key={node.path} className="context-tree-group">
+            <button
+              type="button"
+              className="tree-row tree-dir"
+              onClick={() => handleToggleContextDir(node.path)}
+              style={{ paddingLeft: `${0.55 + depth * 0.8}rem` }}
+            >
+              <span className="tree-glyph">{collapsed ? '+' : '-'}</span>
+              <span className="tree-label">{node.name}</span>
+            </button>
+            {!collapsed ? renderContextTree(node.children, depth + 1) : null}
+          </div>
+        );
+      }
+
+      return (
+        <button
+          type="button"
+          key={node.path}
+          className={`tree-row tree-file ${node.path === selectedContextFilePath ? 'active' : ''}`}
+          onClick={() => setSelectedContextFilePath(node.path)}
+          style={{ paddingLeft: `${0.55 + depth * 0.8}rem` }}
+        >
+          <span className="tree-glyph">*</span>
+          <span className="tree-label">{node.name}</span>
+        </button>
+      );
+    });
+  };
+
   return (
     <div className="camp-workspace trail-shell">
       <header className="trail-header">
@@ -653,6 +892,9 @@ export function CampWorkspaceView() {
         </div>
 
         <div className="trail-toolbar">
+          <button type="button" onClick={() => navigate('/home')}>
+            Home
+          </button>
           <button type="button" onClick={handleUseDefaultWorkspace}>
             Basecamp Folder
           </button>
@@ -668,12 +910,15 @@ export function CampWorkspaceView() {
       {status ? <p className="status-line">{status}</p> : null}
       {error ? <p className="error-line">{error}</p> : null}
 
-      <main className="trail-grid">
-        <aside className="trail-rail">
-          <section className="panel trail-card">
-            <div className="panel-header">
-              <h2>Create Camp</h2>
-            </div>
+      <main className="trail-grid ide-grid">
+        <aside className="panel ide-pane ide-explorer">
+          <div className="panel-header">
+            <h2>Explorer</h2>
+            <span className="count-pill">{attachedContextFiles.length}</span>
+          </div>
+
+          <details className="artifact-drawer ide-drawer" open>
+            <summary>Create Camp</summary>
 
             <label>
               <span>Name</span>
@@ -713,14 +958,13 @@ export function CampWorkspaceView() {
                 Create Camp
               </button>
             </div>
-          </section>
+          </details>
 
-          <section className="panel trail-card camp-list-panel">
+          <section className="explorer-section camp-list-panel">
             <div className="panel-header">
-              <h2>Camp List</h2>
+              <h2>Camps</h2>
               <span className="count-pill">{camps.length}</span>
             </div>
-
             <div className="camp-list-scroll">
               {camps.map((camp) => (
                 <button
@@ -736,51 +980,77 @@ export function CampWorkspaceView() {
               {camps.length === 0 ? <p className="hint">No camps yet. Create one above.</p> : null}
             </div>
           </section>
-        </aside>
 
-        <section className="panel trail-main">
-          <div className="panel-header chat-header">
-            <div>
-              <h2>{selectedCamp ? draftName : 'Select A Camp'}</h2>
-              <p className="hint">{selectedCamp ? draftModel : 'Create one on the left to start chatting.'}</p>
+          <section className="explorer-section explorer-tree">
+            <div className="panel-header">
+              <h2>Context Tree</h2>
+              <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext}>
+                {isRefreshingContext ? 'Refreshing...' : 'Refresh'}
+              </button>
             </div>
 
-            {selectedCamp ? (
-              <button type="button" onClick={handleSaveCamp} disabled={isSaving}>
-                {isSaving ? 'Saving...' : 'Save Changes'}
+            <label>
+              <span>Filter Files</span>
+              <input
+                value={contextTreeQuery}
+                onChange={(event) => setContextTreeQuery(event.target.value)}
+                placeholder="path or file"
+              />
+            </label>
+
+            <div className="context-tree-scroll">
+              {!selectedCamp ? <p className="hint">Select a camp to view its context tree.</p> : null}
+              {selectedCamp && contextTree.length === 0 ? <p className="hint">No attached context files.</p> : null}
+              {selectedCamp ? renderContextTree(contextTree) : null}
+            </div>
+          </section>
+        </aside>
+
+        <section className="panel ide-pane ide-canvas">
+          <div className="panel-header chat-header">
+            <div>
+              <h2>Canvas</h2>
+              <p className="hint">{selectedContextFilePath ?? 'Select a file from the explorer to view or edit.'}</p>
+            </div>
+            <div className="canvas-actions">
+              {selectedCamp ? (
+                <button type="button" onClick={handleSaveCamp} disabled={isSaving}>
+                  {isSaving ? 'Saving Camp...' : 'Save Camp'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="primary-action"
+                onClick={handleSaveContextFile}
+                disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
+              >
+                {isSavingContextFile ? 'Saving File...' : 'Save File'}
               </button>
+            </div>
+          </div>
+
+          <div className="canvas-editor-shell">
+            {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
+            {selectedCamp && !selectedContextFilePath ? <p className="hint">Attach files to this camp, then pick one from the tree.</p> : null}
+            {selectedCamp && selectedContextFilePath ? (
+              isLoadingContextFile ? (
+                <p className="hint">Loading file...</p>
+              ) : (
+                <textarea
+                  className="canvas-editor"
+                  value={contextFileDraft}
+                  onChange={(event) => setContextFileDraft(event.target.value)}
+                  spellCheck={false}
+                />
+              )
             ) : null}
           </div>
 
           {selectedCamp ? (
-            <CampSettingsPanel
-              draftName={draftName}
-              onDraftNameChange={setDraftName}
-              draftModelQuery={draftModelQuery}
-              onDraftModelQueryChange={setDraftModelQuery}
-              draftModel={draftModel}
-              onDraftModelChange={setDraftModel}
-              filteredDraftModelOptions={filteredDraftModelOptions}
-              modelOptionsWithLabels={modelOptionsWithLabels}
-              draftToolsEnabled={draftToolsEnabled}
-              onDraftToolsEnabledChange={setDraftToolsEnabled}
-              draftSystemPrompt={draftSystemPrompt}
-              onDraftSystemPromptChange={setDraftSystemPrompt}
-              draftMemory={draftMemory}
-              onDraftMemoryChange={setDraftMemory}
-              selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
-              activeCampPath={activeCampSummary?.path ?? null}
-            />
-          ) : null}
-
-          {selectedCamp ? (
             <details className="artifact-drawer camp-context-drawer">
-              <summary>Context Files ({attachedContextFiles.length} attached)</summary>
+              <summary>Workspace Context Files ({attachedContextFiles.length} attached)</summary>
               <div className="camp-context-toolbar">
                 <p className="hint">Attach files from workspace `context/` for reusable camp context.</p>
-                <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext}>
-                  {isRefreshingContext ? 'Refreshing...' : 'Refresh'}
-                </button>
               </div>
 
               <div className="artifact-scroll">
@@ -813,6 +1083,66 @@ export function CampWorkspaceView() {
               </div>
             </details>
           ) : null}
+
+          {selectedCamp ? (
+            <CampSettingsPanel
+              draftName={draftName}
+              onDraftNameChange={setDraftName}
+              draftModelQuery={draftModelQuery}
+              onDraftModelQueryChange={setDraftModelQuery}
+              draftModel={draftModel}
+              onDraftModelChange={setDraftModel}
+              filteredDraftModelOptions={filteredDraftModelOptions}
+              modelOptionsWithLabels={modelOptionsWithLabels}
+              draftToolsEnabled={draftToolsEnabled}
+              onDraftToolsEnabledChange={setDraftToolsEnabled}
+              draftSystemPrompt={draftSystemPrompt}
+              onDraftSystemPromptChange={setDraftSystemPrompt}
+              draftMemory={draftMemory}
+              onDraftMemoryChange={setDraftMemory}
+              selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
+              activeCampPath={activeCampSummary?.path ?? null}
+            />
+          ) : null}
+
+          <details className="request-preview">
+            <summary>Request Preview</summary>
+            <pre>{lastRequestPreview ? JSON.stringify(lastRequestPreview, null, 2) : 'No request yet.'}</pre>
+          </details>
+        </section>
+
+        <section className="panel ide-pane ide-chat">
+          <div className="panel-header chat-header">
+            <div>
+              <h2>Chat</h2>
+              <p className="hint">{selectedCamp ? draftName : 'Create one on the left to start chatting.'}</p>
+            </div>
+
+            {selectedCamp ? (
+              <div style={{ textAlign: 'right' }}>
+                <label className="chat-model-picker">
+                  <span>Agent Model (Locked To Camp)</span>
+                  <select value={draftModel} onChange={(event) => setDraftModel(event.target.value)}>
+                    {(filteredDraftModelOptions.length > 0 ? filteredDraftModelOptions : modelOptionsWithLabels).map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {resolvedModel && resolvedModel !== draftModel && (
+                  <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
+                    Resolved: {resolvedModel}
+                  </div>
+                )}
+                {sessionTokens > 0 && (
+                  <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
+                    {sessionTokens.toLocaleString()} tokens
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
 
           <TranscriptView
             selectedCamp={selectedCamp}
@@ -927,11 +1257,6 @@ export function CampWorkspaceView() {
               </button>
             </div>
           </form>
-
-          <details className="request-preview">
-            <summary>Request Preview</summary>
-            <pre>{lastRequestPreview ? JSON.stringify(lastRequestPreview, null, 2) : 'No request yet.'}</pre>
-          </details>
         </section>
       </main>
     </div>
