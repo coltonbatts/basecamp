@@ -7,16 +7,38 @@
 }
 
 :root {
-  color-scheme: light;
-  --bg: #f4f3ed;
-  --text: #1f1d18;
-  font-family: 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
-  background-color: var(--bg);
-  color: var(--text);
+  color-scheme: dark;
+  --bg: #000000;
+  --text: #f0ead6;
+  --text-muted: #9c9a90;
+  --accent: #ff4500;
+  --line: #f0ead6;
+  --line-strong: #f0ead6;
+
+  --font-pixel: 'Geist Pixel', monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.95rem;
+  --text-base: 1.2rem;
+  --text-lg: 2.5rem;
+  --text-xl: 4rem;
+  --text-xxl: 7rem;
+
+  --border-width: 3px;
+  --corner: 6px;
+
+  --grid-unit: 8px;
+  --space-1: var(--grid-unit);
+  --space-2: calc(var(--grid-unit) * 2);
+  --space-3: calc(var(--grid-unit) * 3);
+  --space-4: calc(var(--grid-unit) * 4);
+  --space-5: calc(var(--grid-unit) * 6);
+  --space-6: calc(var(--grid-unit) * 8);
 }
 
 * {
   box-sizing: border-box;
+  border-radius: 0 !important;
 }
 
 html,
@@ -30,6 +52,37 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-pixel);
+  letter-spacing: 0;
+  position: relative;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-size: 8px 8px;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 9999;
+  background: linear-gradient(rgba(0, 0, 0, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+  background-size: 100% 4px;
 }
 
 button,
@@ -37,4 +90,11 @@ input,
 textarea,
 select {
   font: inherit;
+  border-radius: 0;
+}
+
+label,
+button,
+th {
+  text-transform: uppercase;
 }

@@ -61,6 +61,44 @@ export type OpenRouterToolSpec = {
   };
 };
 
+export const OpenRouterKeyInfoSchema = z.object({
+  data: z.object({
+    label: z.string().nullable(),
+    limit: z.number().nullable(),
+    usage: z.number(),
+    limit_remaining: z.number().nullable(),
+    is_free_tier: z.boolean(),
+    rate_limit: z.object({
+      requests: z.number(),
+      interval: z.string()
+    })
+  })
+});
+
+export type OpenRouterKeyInfo = z.infer<typeof OpenRouterKeyInfoSchema>;
+
+export async function fetchOpenRouterKeyInfo(apiKey: string): Promise<OpenRouterKeyInfo["data"]> {
+  const response = await fetch('https://openrouter.ai/api/v1/auth/key', {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch OpenRouter key info with status ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const parsed = OpenRouterKeyInfoSchema.safeParse(payload);
+
+  if (!parsed.success) {
+    throw new Error('Failed to parse OpenRouter key info response.');
+  }
+
+  return parsed.data.data;
+}
+
 export type OpenRouterToolCall = {
   id?: string;
   type: 'function';
@@ -283,9 +321,9 @@ export async function runOpenRouterChatCompletion(
   if (!response.ok) {
     const responseMessage =
       typeof responsePayload === 'object' &&
-      responsePayload !== null &&
-      'error' in responsePayload &&
-      typeof (responsePayload as { error?: { message?: unknown } }).error?.message === 'string'
+        responsePayload !== null &&
+        'error' in responsePayload &&
+        typeof (responsePayload as { error?: { message?: unknown } }).error?.message === 'string'
         ? (responsePayload as { error: { message: string } }).error.message
         : `OpenRouter request failed with status ${response.status}`;
 

@@ -10,6 +10,7 @@ import {
   setToolsEnabled as persistToolsEnabled,
   setWorkspacePath,
 } from '../lib/db';
+import { fetchOpenRouterKeyInfo, type OpenRouterKeyInfo } from '../lib/openrouter';
 import { syncModelsToDb } from '../lib/models';
 
 type SettingsProps = {
@@ -38,6 +39,8 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
   const [toolsEnabled, setToolsEnabledState] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [keyInfo, setKeyInfo] = useState<OpenRouterKeyInfo["data"] | null>(null);
+  const [fetchingKeyInfo, setFetchingKeyInfo] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -130,6 +133,28 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
     }
   };
 
+  const handleCheckUsage = async () => {
+    setFetchingKeyInfo(true);
+    setError(null);
+    setStatus(null);
+    setKeyInfo(null);
+
+    try {
+      const apiKeyFromStore = await getApiKey();
+      if (!apiKeyFromStore) {
+        throw new Error('OpenRouter API key is missing. Save it before checking usage.');
+      }
+
+      const info = await fetchOpenRouterKeyInfo(apiKeyFromStore);
+      setKeyInfo(info);
+      setStatus('Key info retrieved successfully.');
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : 'Unable to fetch key info.');
+    } finally {
+      setFetchingKeyInfo(false);
+    }
+  };
+
   const handleToolsToggle = async (enabled: boolean) => {
     setSavingToolsEnabled(true);
     setError(null);
@@ -178,8 +203,39 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
               <button type="button" className="secondary" onClick={() => void handleSyncModels()} disabled={syncing}>
                 {syncing ? 'Syncing...' : 'Sync Models'}
               </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void handleCheckUsage()}
+                disabled={fetchingKeyInfo}
+              >
+                {fetchingKeyInfo ? 'Checking...' : 'Check Credits'}
+              </button>
             </div>
           </form>
+
+          {keyInfo && (
+            <div className="settings-subsection usage-stats">
+              <h3>OpenRouter Key Info</h3>
+              <p className="settings-note">
+                <strong>Usage:</strong> ${keyInfo.usage.toFixed(4)}
+              </p>
+              <p className="settings-note">
+                <strong>Limit:</strong> {keyInfo.limit !== null ? `$${keyInfo.limit.toFixed(4)}` : 'None'}
+              </p>
+              {keyInfo.limit_remaining !== null && (
+                <p className="settings-note">
+                  <strong>Remaining:</strong> ${keyInfo.limit_remaining.toFixed(4)}
+                </p>
+              )}
+              <p className="settings-note">
+                <strong>Tier:</strong> {keyInfo.is_free_tier ? 'Free' : 'Paid'}
+              </p>
+              <p className="settings-note">
+                <strong>Rate Limit:</strong> {keyInfo.rate_limit.requests} req / {keyInfo.rate_limit.interval}
+              </p>
+            </div>
+          )}
 
           <p className="settings-note">Cached models: {cachedModelCount}</p>
           <p className="settings-note">Last model sync: {formatLastSync(modelsLastSync)}</p>
