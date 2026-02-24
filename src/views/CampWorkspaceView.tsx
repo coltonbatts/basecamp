@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FormEvent, KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import '../App.css';
@@ -7,9 +7,11 @@ import { CampSettingsPanel } from '../components/CampSettingsPanel';
 import { TranscriptView } from '../components/TranscriptView';
 import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
 import {
+  campAttachWorkspaceContextFile,
   campAppendMessage,
   campCreate,
   campCreateArtifactFromMessage,
+  campDetachWorkspaceContextFile,
   campGetArtifact,
   campIncrementArtifactUsage,
   campListContextFiles,
@@ -26,6 +28,7 @@ import {
   getApiKey,
   pickWorkspaceFolder,
   setWorkspacePath,
+  workspaceListContextFiles,
 } from '../lib/db';
 import { runCampChatRuntime } from '../lib/campChatRuntime';
 import { syncModelsToDb } from '../lib/models';
@@ -54,18 +57,6 @@ function parseJsonInput(raw: string): unknown {
   return JSON.parse(trimmed);
 }
 
-function computeProgressLabel(artifactCount: number): 'Basecamp' | 'Ridge' | 'Summit' {
-  if (artifactCount >= 8) {
-    return 'Summit';
-  }
-
-  if (artifactCount >= 3) {
-    return 'Ridge';
-  }
-
-  return 'Basecamp';
-}
-
 function modelDisplayLabel(model: ModelRow): string {
   if (model.name && model.name.trim()) {
     return `${model.name} (${model.id})`;
@@ -83,6 +74,8 @@ export function CampWorkspaceView() {
   const [selectedCampId, setSelectedCampId] = useState<string | null>(null);
   const [selectedCamp, setSelectedCamp] = useState<Camp | null>(null);
   const [artifacts, setArtifacts] = useState<CampArtifactMetadata[]>([]);
+  const [globalContextFiles, setGlobalContextFiles] = useState<string[]>([]);
+  const [attachedContextFiles, setAttachedContextFiles] = useState<string[]>([]);
 
   const [draftName, setDraftName] = useState('');
   const [draftModel, setDraftModel] = useState(FALLBACK_MODEL);
@@ -115,10 +108,13 @@ export function CampWorkspaceView() {
   const [isSaving, setIsSaving] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSyncingModels, setIsSyncingModels] = useState(false);
+  const [isRefreshingContext, setIsRefreshingContext] = useState(false);
+  const [isMutatingContext, setIsMutatingContext] = useState(false);
   const [promotingMessageId, setPromotingMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [lastRequestPreview, setLastRequestPreview] = useState<OpenRouterChatRequestPayload | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const modelOptions = useMemo(
     () => (models.length > 0 ? models.map((model) => model.id) : [FALLBACK_MODEL]),
@@ -147,10 +143,6 @@ export function CampWorkspaceView() {
   }, [modelOptionsWithLabels, draftModelQuery]);
   const selectedDraftModel = modelById.get(draftModel) ?? null;
 
-  const artifactCount = artifacts.length;
-  const reusedArtifactCount = artifacts.filter((artifact) => artifact.usage_count > 0).length;
-  const conversationTurnCount = selectedCamp?.transcript.filter((message) => message.role === 'user').length ?? 0;
-  const progressionLabel = computeProgressLabel(artifactCount);
   const activeCampSummary = camps.find((camp) => camp.id === selectedCampId) ?? null;
 
   const loadModels = useCallback(async () => {
@@ -159,7 +151,7 @@ export function CampWorkspaceView() {
   }, []);
 
   const loadCamps = useCallback(async () => {
-    const rows = await campList();
+    const rows = (await campList()).sort((left, right) => right.updated_at - left.updated_at);
     setCamps(rows);
     setSelectedCampId((previous) => {
       if (routeCampId && rows.some((camp) => camp.id === routeCampId)) {
@@ -180,11 +172,46 @@ export function CampWorkspaceView() {
     pruneSelectedArtifacts(rows.map((artifact) => artifact.id));
   }, [pruneSelectedArtifacts]);
 
+  const loadGlobalContextFiles = useCallback(async () => {
+    const files = await workspaceListContextFiles();
+    setGlobalContextFiles(files.filter((entry) => !entry.endsWith('/')));
+  }, []);
+
+  const loadCampContextFiles = useCallback(async (campId: string): Promise<string[]> => {
+    const pendingDirectories = [''];
+    const visitedDirectories = new Set<string>(['']);
+    const discoveredFiles = new Set<string>();
+
+    while (pendingDirectories.length > 0) {
+      const currentPath = pendingDirectories.pop() ?? '';
+      const entries = await campListContextFiles(campId, currentPath || undefined);
+
+      for (const entry of entries) {
+        if (entry.endsWith('/')) {
+          if (!visitedDirectories.has(entry)) {
+            visitedDirectories.add(entry);
+            pendingDirectories.push(entry);
+          }
+          continue;
+        }
+
+        discoveredFiles.add(entry);
+      }
+    }
+
+    return [...discoveredFiles].sort();
+  }, []);
+
   const loadSelectedCamp = useCallback(
     async (campId: string) => {
-      const [camp, artifactRows] = await Promise.all([campLoad(campId), campListArtifacts(campId)]);
+      const [camp, artifactRows, contextFiles] = await Promise.all([
+        campLoad(campId),
+        campListArtifacts(campId),
+        loadCampContextFiles(campId),
+      ]);
       setSelectedCamp(camp);
       setArtifacts(artifactRows);
+      setAttachedContextFiles(contextFiles);
       setDraftName(camp.config.name);
       setDraftModel(camp.config.model);
       setDraftToolsEnabled(camp.config.tools_enabled);
@@ -193,13 +220,14 @@ export function CampWorkspaceView() {
       setDraftMemory(prettyJson(camp.memory));
       clearSelectedArtifacts();
     },
-    [clearSelectedArtifacts],
+    [clearSelectedArtifacts, loadCampContextFiles],
   );
 
   useEffect(() => {
     const boot = async () => {
       try {
         await loadModels();
+        await loadGlobalContextFiles();
         const defaultWorkspacePath = await ensureDefaultWorkspace();
         setWorkspacePathValue(defaultWorkspacePath);
         await loadCamps();
@@ -209,7 +237,7 @@ export function CampWorkspaceView() {
     };
 
     void boot();
-  }, [loadCamps, loadModels]);
+  }, [loadCamps, loadGlobalContextFiles, loadModels]);
 
   useEffect(() => {
     if (!modelOptions.includes(newCampModel)) {
@@ -247,6 +275,7 @@ export function CampWorkspaceView() {
     if (!selectedCampId) {
       setSelectedCamp(null);
       setArtifacts([]);
+      setAttachedContextFiles([]);
       clearSelectedArtifacts();
       return;
     }
@@ -255,6 +284,14 @@ export function CampWorkspaceView() {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load camp.');
     });
   }, [clearSelectedArtifacts, selectedCampId, loadSelectedCamp]);
+
+  useEffect(() => {
+    if (!selectedCampId || isSending) {
+      return;
+    }
+
+    composerTextareaRef.current?.focus();
+  }, [isSending, selectedCampId]);
 
   const handlePickWorkspace = async () => {
     setError(null);
@@ -360,6 +397,30 @@ export function CampWorkspaceView() {
     return refreshedCamp;
   }, [draftMemory, draftModel, draftName, draftSystemPrompt, draftToolsEnabled, loadCamps, selectedCampId]);
 
+  const persistCampDraftsForSend = useCallback(async () => {
+    if (!selectedCampId) {
+      throw new Error('No camp selected.');
+    }
+
+    await campUpdateConfig({
+      camp_id: selectedCampId,
+      name: draftName,
+      model: draftModel,
+      tools_enabled: draftToolsEnabled,
+    });
+
+    await campUpdateSystemPrompt({
+      camp_id: selectedCampId,
+      system_prompt: draftSystemPrompt,
+    });
+
+    const refreshedCamp = await campLoad(selectedCampId);
+    setSelectedCamp(refreshedCamp);
+    await loadCamps();
+
+    return refreshedCamp;
+  }, [draftModel, draftName, draftSystemPrompt, draftToolsEnabled, loadCamps, selectedCampId]);
+
   const handleSaveCamp = async () => {
     setIsSaving(true);
     setError(null);
@@ -393,6 +454,66 @@ export function CampWorkspaceView() {
       setError(syncError instanceof Error ? syncError.message : 'Unable to sync models.');
     } finally {
       setIsSyncingModels(false);
+    }
+  };
+
+  const handleRefreshContext = async () => {
+    setIsRefreshingContext(true);
+    setError(null);
+    setStatus(null);
+
+    try {
+      await loadGlobalContextFiles();
+      if (selectedCampId) {
+        await loadSelectedCamp(selectedCampId);
+      }
+      setStatus('Context files refreshed.');
+    } catch (contextError) {
+      setError(contextError instanceof Error ? contextError.message : 'Unable to refresh context files.');
+    } finally {
+      setIsRefreshingContext(false);
+    }
+  };
+
+  const handleAttachContext = async (path: string) => {
+    if (!selectedCampId) {
+      return;
+    }
+
+    setIsMutatingContext(true);
+    setError(null);
+    setStatus(null);
+
+    try {
+      await campAttachWorkspaceContextFile(selectedCampId, path);
+      await loadSelectedCamp(selectedCampId);
+      await loadCamps();
+      setStatus(`Attached ${path}`);
+    } catch (attachError) {
+      setError(attachError instanceof Error ? attachError.message : 'Unable to attach context file.');
+    } finally {
+      setIsMutatingContext(false);
+    }
+  };
+
+  const handleDetachContext = async (path: string) => {
+    if (!selectedCampId) {
+      return;
+    }
+
+    setIsMutatingContext(true);
+    setError(null);
+    setStatus(null);
+
+    try {
+      await campDetachWorkspaceContextFile(selectedCampId, path);
+      await loadSelectedCamp(selectedCampId);
+      await loadCamps();
+      setStatus(`Detached ${path}`);
+    } catch (detachError) {
+      setError(detachError instanceof Error ? detachError.message : 'Unable to detach context file.');
+    } finally {
+      setIsMutatingContext(false);
     }
   };
 
@@ -446,7 +567,7 @@ export function CampWorkspaceView() {
         throw new Error('OpenRouter API key is missing. Save it in Settings first.');
       }
 
-      await persistCampDrafts();
+      await persistCampDraftsForSend();
 
       await campAppendMessage({
         camp_id: selectedCampId,
@@ -516,6 +637,13 @@ export function CampWorkspaceView() {
     }
   };
 
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  };
+
   return (
     <div className="camp-workspace trail-shell">
       <header className="trail-header">
@@ -536,18 +664,6 @@ export function CampWorkspaceView() {
           </button>
         </div>
       </header>
-
-      <div className="trail-stats">
-        <span>{progressionLabel}</span>
-        <span>
-          {camps.length} Camp{camps.length === 1 ? '' : 's'}
-        </span>
-        <span>
-          {artifactCount} Artifact{artifactCount === 1 ? '' : 's'}
-        </span>
-        <span>{conversationTurnCount} Turns</span>
-        <span>{reusedArtifactCount} Reused</span>
-      </div>
 
       {status ? <p className="status-line">{status}</p> : null}
       {error ? <p className="error-line">{error}</p> : null}
@@ -654,12 +770,48 @@ export function CampWorkspaceView() {
               onDraftMemoryChange={setDraftMemory}
               selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
               activeCampPath={activeCampSummary?.path ?? null}
-              selectedArtifactIds={selectedArtifactIds}
-              artifactQuery={artifactQuery}
-              onArtifactQueryChange={setArtifactQuery}
-              visibleArtifacts={visibleArtifacts}
-              onToggleArtifactSelection={toggleArtifactSelection}
             />
+          ) : null}
+
+          {selectedCamp ? (
+            <details className="artifact-drawer camp-context-drawer">
+              <summary>Context Files ({attachedContextFiles.length} attached)</summary>
+              <div className="camp-context-toolbar">
+                <p className="hint">Attach files from workspace `context/` for reusable camp context.</p>
+                <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext}>
+                  {isRefreshingContext ? 'Refreshing...' : 'Refresh'}
+                </button>
+              </div>
+
+              <div className="artifact-scroll">
+                {globalContextFiles.map((path) => {
+                  const isAttached = attachedContextFiles.includes(path);
+
+                  return (
+                    <article key={path} className="artifact-item camp-context-item">
+                      <header>
+                        <strong>{path}</strong>
+                        <button
+                          type="button"
+                          className={isAttached ? '' : 'primary-action'}
+                          disabled={isMutatingContext}
+                          onClick={() => {
+                            if (isAttached) {
+                              void handleDetachContext(path);
+                              return;
+                            }
+                            void handleAttachContext(path);
+                          }}
+                        >
+                          {isAttached ? 'Detach' : 'Attach'}
+                        </button>
+                      </header>
+                    </article>
+                  );
+                })}
+                {globalContextFiles.length === 0 ? <p className="hint">No files found in workspace `context/`.</p> : null}
+              </div>
+            </details>
           ) : null}
 
           <TranscriptView
@@ -674,6 +826,45 @@ export function CampWorkspaceView() {
           />
 
           <form className="composer" onSubmit={handleSendMessage}>
+            {selectedCamp ? (
+              <details className="artifact-drawer composer-artifact-drawer">
+                <summary>
+                  {selectedArtifactIds.length > 0
+                    ? `${selectedArtifactIds.length} artifact${selectedArtifactIds.length === 1 ? '' : 's'} selected`
+                    : 'Include artifacts'}
+                </summary>
+
+                <label>
+                  <span>Search</span>
+                  <input
+                    value={artifactQuery}
+                    onChange={(event) => setArtifactQuery(event.target.value)}
+                    placeholder="title or tag"
+                  />
+                </label>
+
+                <div className="artifact-scroll">
+                  {visibleArtifacts.map((artifact) => (
+                    <article key={artifact.id} className="artifact-item">
+                      <header>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={selectedArtifactIds.includes(artifact.id)}
+                            onChange={() => toggleArtifactSelection(artifact.id)}
+                          />
+                          <strong>{artifact.title}</strong>
+                        </label>
+                        <time>{new Date(artifact.updated_at).toLocaleString()}</time>
+                      </header>
+                      <p>{artifact.tags.join(', ')}</p>
+                    </article>
+                  ))}
+                  {visibleArtifacts.length === 0 ? <p className="hint">No artifacts yet.</p> : null}
+                </div>
+              </details>
+            ) : null}
+
             {selectedArtifactsForComposer.length > 0 ? (
               <div className="artifact-chip-row">
                 {selectedArtifactsForComposer.map((artifact) => (
@@ -690,40 +881,47 @@ export function CampWorkspaceView() {
             ) : null}
 
             <label>
-              <span>Prompt</span>
+              <span>Message</span>
               <textarea
+                ref={composerTextareaRef}
                 value={userMessage}
                 onChange={(event) => setUserMessage(event.target.value)}
-                rows={4}
+                onKeyDown={handleComposerKeyDown}
+                rows={6}
                 placeholder={selectedCamp ? 'Ask for planning, analysis, or drafting help...' : 'Create or select a camp first'}
                 disabled={!selectedCamp}
+                autoFocus
               />
             </label>
 
-            <div className="composer-controls">
-              <label>
-                <span>Temperature</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={temperature}
-                  onChange={(event) => setTemperature(Number(event.target.value))}
-                />
-              </label>
+            <div className="composer-actions">
+              <details className="composer-tuning">
+                <summary>Model Controls</summary>
+                <div className="composer-controls">
+                  <label>
+                    <span>Temperature</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      value={temperature}
+                      onChange={(event) => setTemperature(Number(event.target.value))}
+                    />
+                  </label>
 
-              <label>
-                <span>Max Tokens</span>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={maxTokens}
-                  onChange={(event) => setMaxTokens(Math.max(1, Math.floor(Number(event.target.value))))}
-                />
-              </label>
-
+                  <label>
+                    <span>Max Tokens</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={maxTokens}
+                      onChange={(event) => setMaxTokens(Math.max(1, Math.floor(Number(event.target.value))))}
+                    />
+                  </label>
+                </div>
+              </details>
               <button type="submit" className="primary-action" disabled={isSending || !selectedCamp}>
                 {isSending ? 'Generating...' : 'Send Message'}
               </button>

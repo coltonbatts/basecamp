@@ -2,24 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { CampCard } from '../components/home/CampCard';
-import { ContextManager } from '../components/home/ContextManager';
-import { ModelManager } from '../components/home/ModelManager';
 import {
-  campAttachWorkspaceContextFile,
   campCreate,
-  campDetachWorkspaceContextFile,
   campList,
-  campListArtifacts,
-  campListContextFiles,
   campLoad,
-  campUpdateConfig,
-  campUpdateSystemPrompt,
   dbListModels,
   ensureDefaultWorkspace,
   getApiKey,
   getDefaultModel,
-  setDefaultModel,
-  workspaceListContextFiles,
 } from '../lib/db';
 import { syncModelsToDb } from '../lib/models';
 import type { Camp, CampSummary, ModelRow } from '../lib/types';
@@ -28,25 +18,46 @@ import './HomeView.css';
 const FALLBACK_MODEL = 'openrouter/auto';
 
 type HomeCampMeta = {
-  artifactCount: number;
   promptPreview: string;
 };
 
-function compactPromptPreview(prompt: string): string {
-  const line = prompt
+function firstNonEmptyLine(value: string): string | null {
+  const line = value
     .split(/\r?\n/)
-    .map((value) => value.trim())
-    .find((value) => value.length > 0);
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0);
 
-  if (!line) {
-    return 'No system prompt.';
+  return line ?? null;
+}
+
+function oneLinePreview(value: string): string {
+  const singleLine = value.replace(/\s+/g, ' ').trim();
+  if (!singleLine) {
+    return 'No context yet.';
   }
 
-  if (line.length <= 120) {
-    return line;
+  if (singleLine.length <= 120) {
+    return singleLine;
   }
 
-  return `${line.slice(0, 117)}...`;
+  return `${singleLine.slice(0, 117)}...`;
+}
+
+function campPreview(camp: Camp): string {
+  const fromPrompt = firstNonEmptyLine(camp.system_prompt);
+  if (fromPrompt) {
+    return oneLinePreview(fromPrompt);
+  }
+
+  const fromTranscript = [...camp.transcript]
+    .reverse()
+    .find((message) => message.role !== 'tool' && message.content.trim().length > 0)?.content;
+
+  if (fromTranscript) {
+    return oneLinePreview(fromTranscript);
+  }
+
+  return 'No context yet.';
 }
 
 function modelDisplayLabel(model: ModelRow): string {
@@ -63,30 +74,17 @@ export function HomeView() {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [camps, setCamps] = useState<CampSummary[]>([]);
   const [campMetaById, setCampMetaById] = useState<Record<string, HomeCampMeta>>({});
-  const [selectedCampId, setSelectedCampId] = useState<string | null>(null);
-
-  const [selectedCamp, setSelectedCamp] = useState<Camp | null>(null);
-  const [selectedCampModel, setSelectedCampModel] = useState(FALLBACK_MODEL);
-  const [selectedCampPrompt, setSelectedCampPrompt] = useState('');
-  const [attachedContextFiles, setAttachedContextFiles] = useState<string[]>([]);
 
   const [models, setModels] = useState<ModelRow[]>([]);
-  const [defaultModel, setDefaultModelValue] = useState(FALLBACK_MODEL);
-  const [draftDefaultModel, setDraftDefaultModel] = useState(FALLBACK_MODEL);
+  const [defaultModel, setDefaultModel] = useState(FALLBACK_MODEL);
 
   const [newCampName, setNewCampName] = useState('New Camp');
   const [newCampModel, setNewCampModel] = useState(FALLBACK_MODEL);
-
-  const [globalContextFiles, setGlobalContextFiles] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<'models' | 'context'>('models');
+  const [campQuery, setCampQuery] = useState('');
 
   const [isBooting, setIsBooting] = useState(true);
   const [isCreatingCamp, setIsCreatingCamp] = useState(false);
-  const [isSavingCamp, setIsSavingCamp] = useState(false);
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
-  const [isSavingDefaultModel, setIsSavingDefaultModel] = useState(false);
-  const [isRefreshingContext, setIsRefreshingContext] = useState(false);
-  const [isMutatingContext, setIsMutatingContext] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -99,19 +97,31 @@ export function HomeView() {
       options.set(model.id, modelDisplayLabel(model));
     }
 
-    for (const value of [defaultModel, draftDefaultModel, newCampModel, selectedCampModel]) {
-      const trimmed = value.trim();
-      if (!trimmed || options.has(trimmed)) {
-        continue;
-      }
-
-      options.set(trimmed, trimmed);
+    const normalizedDefault = defaultModel.trim();
+    if (normalizedDefault && !options.has(normalizedDefault)) {
+      options.set(normalizedDefault, normalizedDefault);
     }
 
     return Array.from(options.entries()).map(([id, label]) => ({ id, label }));
-  }, [defaultModel, draftDefaultModel, models, newCampModel, selectedCampModel]);
+  }, [defaultModel, models]);
 
-  const activeCampMeta = selectedCampId ? campMetaById[selectedCampId] : undefined;
+  const visibleCamps = useMemo(() => {
+    const normalizedQuery = campQuery.trim().toLowerCase();
+
+    const sorted = [...camps].sort((left, right) => right.updated_at - left.updated_at);
+    if (!normalizedQuery) {
+      return sorted;
+    }
+
+    return sorted.filter((camp) => {
+      const preview = campMetaById[camp.id]?.promptPreview ?? '';
+      return (
+        camp.name.toLowerCase().includes(normalizedQuery) ||
+        camp.model.toLowerCase().includes(normalizedQuery) ||
+        preview.toLowerCase().includes(normalizedQuery)
+      );
+    });
+  }, [campMetaById, campQuery, camps]);
 
   const resetFeedback = () => {
     setError(null);
@@ -127,86 +137,27 @@ export function HomeView() {
     const value = (await getDefaultModel()) ?? FALLBACK_MODEL;
     const normalized = value.trim() || FALLBACK_MODEL;
 
-    setDefaultModelValue(normalized);
-    setDraftDefaultModel(normalized);
+    setDefaultModel(normalized);
     setNewCampModel(normalized);
   }, []);
 
   const loadCamps = useCallback(async () => {
     const rows = await campList();
     setCamps(rows);
-    setSelectedCampId((previous) => {
-      if (previous && rows.some((camp) => camp.id === previous)) {
-        return previous;
-      }
-
-      return rows[0]?.id ?? null;
-    });
 
     const metadataEntries = await Promise.all(
       rows.map(async (camp) => {
         try {
-          const [campData, artifacts] = await Promise.all([campLoad(camp.id), campListArtifacts(camp.id)]);
-          return [
-            camp.id,
-            {
-              artifactCount: artifacts.length,
-              promptPreview: compactPromptPreview(campData.system_prompt),
-            },
-          ] as const;
+          const fullCamp = await campLoad(camp.id);
+          return [camp.id, { promptPreview: campPreview(fullCamp) }] as const;
         } catch {
-          return [
-            camp.id,
-            {
-              artifactCount: 0,
-              promptPreview: 'Unable to load system prompt.',
-            },
-          ] as const;
+          return [camp.id, { promptPreview: 'Unable to read camp preview.' }] as const;
         }
       }),
     );
 
     setCampMetaById(Object.fromEntries(metadataEntries));
   }, []);
-
-  const loadGlobalContextFiles = useCallback(async () => {
-    const files = await workspaceListContextFiles();
-    setGlobalContextFiles(files.filter((entry) => !entry.endsWith('/')));
-  }, []);
-
-  const loadCampContextFiles = useCallback(async (campId: string): Promise<string[]> => {
-    const pendingDirectories = [''];
-    const visitedDirectories = new Set<string>(['']);
-    const discoveredFiles = new Set<string>();
-
-    while (pendingDirectories.length > 0) {
-      const currentPath = pendingDirectories.pop() ?? '';
-      const entries = await campListContextFiles(campId, currentPath || undefined);
-
-      for (const entry of entries) {
-        if (entry.endsWith('/')) {
-          if (!visitedDirectories.has(entry)) {
-            visitedDirectories.add(entry);
-            pendingDirectories.push(entry);
-          }
-          continue;
-        }
-
-        discoveredFiles.add(entry);
-      }
-    }
-
-    return [...discoveredFiles].sort();
-  }, []);
-
-  const loadSelectedCamp = useCallback(async (campId: string) => {
-    const [camp, contextFiles] = await Promise.all([campLoad(campId), loadCampContextFiles(campId)]);
-
-    setSelectedCamp(camp);
-    setSelectedCampModel(camp.config.model);
-    setSelectedCampPrompt(camp.system_prompt);
-    setAttachedContextFiles(contextFiles);
-  }, [loadCampContextFiles]);
 
   useEffect(() => {
     const boot = async () => {
@@ -217,7 +168,7 @@ export function HomeView() {
         const defaultWorkspacePath = await ensureDefaultWorkspace();
         setWorkspacePath(defaultWorkspacePath);
 
-        await Promise.all([loadModels(), loadDefaultModel(), loadCamps(), loadGlobalContextFiles()]);
+        await Promise.all([loadModels(), loadDefaultModel(), loadCamps()]);
       } catch (bootError) {
         setError(bootError instanceof Error ? bootError.message : 'Unable to load home view.');
       } finally {
@@ -226,21 +177,7 @@ export function HomeView() {
     };
 
     void boot();
-  }, [loadCamps, loadDefaultModel, loadGlobalContextFiles, loadModels]);
-
-  useEffect(() => {
-    if (!selectedCampId) {
-      setSelectedCamp(null);
-      setSelectedCampPrompt('');
-      setSelectedCampModel(defaultModel);
-      setAttachedContextFiles([]);
-      return;
-    }
-
-    void loadSelectedCamp(selectedCampId).catch((loadError) => {
-      setError(loadError instanceof Error ? loadError.message : 'Unable to load selected camp.');
-    });
-  }, [defaultModel, loadSelectedCamp, selectedCampId]);
+  }, [loadCamps, loadDefaultModel, loadModels]);
 
   const handleCreateCamp = async () => {
     if (!workspacePath) {
@@ -260,10 +197,9 @@ export function HomeView() {
         tools_enabled: false,
       });
 
-      await loadCamps();
-      setSelectedCampId(created.config.id);
       setNewCampName('New Camp');
-      setStatus(`Created camp ${created.config.name}.`);
+      await loadCamps();
+      navigate(`/camp/${created.config.id}`);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : 'Unable to create camp.');
     } finally {
@@ -291,293 +227,77 @@ export function HomeView() {
     }
   };
 
-  const handleSaveDefaultModel = async () => {
-    setIsSavingDefaultModel(true);
-    resetFeedback();
-
-    try {
-      await setDefaultModel(draftDefaultModel);
-      setDefaultModelValue(draftDefaultModel);
-      setStatus(`Default model set to ${draftDefaultModel}.`);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Unable to save default model.');
-    } finally {
-      setIsSavingDefaultModel(false);
-    }
-  };
-
-  const handleSaveActiveCamp = async () => {
-    if (!selectedCampId || !selectedCamp) {
-      return;
-    }
-
-    setIsSavingCamp(true);
-    resetFeedback();
-
-    try {
-      await campUpdateConfig({
-        camp_id: selectedCampId,
-        name: selectedCamp.config.name,
-        model: selectedCampModel,
-        tools_enabled: selectedCamp.config.tools_enabled,
-      });
-
-      await campUpdateSystemPrompt({
-        camp_id: selectedCampId,
-        system_prompt: selectedCampPrompt,
-      });
-
-      await Promise.all([loadSelectedCamp(selectedCampId), loadCamps()]);
-      setStatus(`Saved ${selectedCamp.config.name}.`);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : 'Unable to save active camp.');
-    } finally {
-      setIsSavingCamp(false);
-    }
-  };
-
-  const handleRefreshContext = async () => {
-    setIsRefreshingContext(true);
-    resetFeedback();
-
-    try {
-      await loadGlobalContextFiles();
-      if (selectedCampId) {
-        await loadSelectedCamp(selectedCampId);
-      }
-      setStatus('Context list refreshed.');
-    } catch (contextError) {
-      setError(contextError instanceof Error ? contextError.message : 'Unable to refresh context files.');
-    } finally {
-      setIsRefreshingContext(false);
-    }
-  };
-
-  const handleAttachContext = async (path: string) => {
-    if (!selectedCampId) {
-      return;
-    }
-
-    setIsMutatingContext(true);
-    resetFeedback();
-
-    try {
-      await campAttachWorkspaceContextFile(selectedCampId, path);
-      await Promise.all([loadSelectedCamp(selectedCampId), loadCamps()]);
-      setStatus(`Attached ${path}.`);
-    } catch (attachError) {
-      setError(attachError instanceof Error ? attachError.message : 'Unable to attach context file.');
-    } finally {
-      setIsMutatingContext(false);
-    }
-  };
-
-  const handleDetachContext = async (path: string) => {
-    if (!selectedCampId) {
-      return;
-    }
-
-    setIsMutatingContext(true);
-    resetFeedback();
-
-    try {
-      await campDetachWorkspaceContextFile(selectedCampId, path);
-      await Promise.all([loadSelectedCamp(selectedCampId), loadCamps()]);
-      setStatus(`Detached ${path}.`);
-    } catch (detachError) {
-      setError(detachError instanceof Error ? detachError.message : 'Unable to detach context file.');
-    } finally {
-      setIsMutatingContext(false);
-    }
-  };
-
-  const openCampWorkspace = (campId: string) => {
-    navigate(`/camp/${campId}`);
-  };
-
   return (
-    <div className="command-deck">
-      <header className="deck-topbar">
-        <div className="deck-branding">
-          <h1>BASECAMP</h1>
+    <div className="home-dashboard" aria-busy={isBooting}>
+      <header className="home-dashboard-header">
+        <div>
+          <h1>Basecamp</h1>
           <p>{workspacePath ?? 'Loading workspace...'}</p>
         </div>
-
-        <div className="deck-top-actions">
-          <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={isCreatingCamp || isBooting}>
-            {isCreatingCamp ? 'Creating Camp' : 'New Camp'}
-          </button>
-          <button type="button" onClick={handleRefreshModels} disabled={isRefreshingModels || isBooting}>
-            {isRefreshingModels ? 'Refreshing Models' : 'Refresh Models'}
-          </button>
-        </div>
+        <button type="button" onClick={handleRefreshModels} disabled={isRefreshingModels || isBooting}>
+          {isRefreshingModels ? 'Refreshing Models' : 'Refresh Models'}
+        </button>
       </header>
 
       {status ? <p className="status-line">{status}</p> : null}
       {error ? <p className="error-line">{error}</p> : null}
 
-      <main className="deck-layout" aria-busy={isBooting}>
-        <section className="deck-zone deck-camps" aria-label="Camps">
-          <div className="zone-header">
-            <h2>Camps</h2>
-            <span>{camps.length}</span>
-          </div>
+      <section className="home-create-camp" aria-label="Create camp">
+        <label>
+          <span>Camp Name</span>
+          <input
+            value={newCampName}
+            onChange={(event) => setNewCampName(event.target.value)}
+            placeholder="New Camp"
+            aria-label="New camp name"
+          />
+        </label>
 
-          <div className="new-camp-form">
-            <label>
-              <span>Camp Name</span>
-              <input
-                value={newCampName}
-                onChange={(event) => setNewCampName(event.target.value)}
-                placeholder="New Camp"
-                aria-label="New camp name"
-              />
-            </label>
-
-            <label>
-              <span>Model</span>
-              <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
-                {modelOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={isCreatingCamp || isBooting}>
-              {isCreatingCamp ? 'Creating Camp' : 'Create Camp'}
-            </button>
-          </div>
-
-          <div className="camp-list" role="list">
-            {camps.map((camp) => (
-              <CampCard
-                key={camp.id}
-                camp={camp}
-                promptPreview={campMetaById[camp.id]?.promptPreview ?? 'No system prompt.'}
-                artifactCount={campMetaById[camp.id]?.artifactCount ?? 0}
-                isActive={camp.id === selectedCampId}
-                onPreview={() => setSelectedCampId(camp.id)}
-                onOpen={() => openCampWorkspace(camp.id)}
-              />
+        <label>
+          <span>Model</span>
+          <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
+            {modelOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
             ))}
+          </select>
+        </label>
+
+        <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={isCreatingCamp || isBooting}>
+          {isCreatingCamp ? 'Creating Camp' : 'Create Camp'}
+        </button>
+      </section>
+
+      <section className="home-camp-list" aria-label="Camp list">
+        <header>
+          <h2>Camps</h2>
+          <div>
+            <span>{visibleCamps.length} shown</span>
+            <label>
+              <span>Search</span>
+              <input
+                value={campQuery}
+                onChange={(event) => setCampQuery(event.target.value)}
+                placeholder="Search camps"
+                aria-label="Search camps"
+              />
+            </label>
           </div>
-        </section>
+        </header>
 
-        <section className="deck-zone deck-active" aria-label="Active camp preview">
-          <div className="zone-header">
-            <h2>Active Camp</h2>
-          </div>
-
-          {selectedCamp ? (
-            <>
-              <p className="active-camp-name">{selectedCamp.config.name}</p>
-              <p className="active-camp-path">{selectedCamp.config.id}</p>
-
-              <label>
-                <span>Model</span>
-                <select value={selectedCampModel} onChange={(event) => setSelectedCampModel(event.target.value)}>
-                  {modelOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                <span>System Prompt</span>
-                <textarea
-                  rows={8}
-                  value={selectedCampPrompt}
-                  onChange={(event) => setSelectedCampPrompt(event.target.value)}
-                  placeholder="Set the camp system prompt"
-                />
-              </label>
-
-              <section className="active-context-list" aria-label="Attached context files">
-                <h3>Attached Context</h3>
-                <div className="tag-list">
-                  {attachedContextFiles.map((path) => (
-                    <span key={path} className="tag-item">
-                      {path}
-                    </span>
-                  ))}
-                  {attachedContextFiles.length === 0 ? <p className="empty-state">No context attached.</p> : null}
-                </div>
-              </section>
-
-              <p className="panel-meta">Last updated: {new Date(selectedCamp.config.updated_at).toLocaleString()}</p>
-
-              <div className="panel-actions">
-                <button type="button" onClick={handleSaveActiveCamp} disabled={isSavingCamp}>
-                  {isSavingCamp ? 'Saving' : 'Save Camp'}
-                </button>
-                <button type="button" className="primary-action" onClick={() => openCampWorkspace(selectedCamp.config.id)}>
-                  Open Camp
-                </button>
-              </div>
-            </>
-          ) : (
-            <p className="empty-state">No camp selected.</p>
-          )}
-
-          {activeCampMeta ? (
-            <div className="active-camp-meta">
-              <span>{activeCampMeta.artifactCount} artifacts</span>
-              <span>{activeCampMeta.promptPreview}</span>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="deck-zone deck-right" aria-label="Models and context">
-          <div className="tab-row" role="tablist" aria-label="Right panel tabs">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'models'}
-              className={activeTab === 'models' ? 'tab-active' : ''}
-              onClick={() => setActiveTab('models')}
-            >
-              Models
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'context'}
-              className={activeTab === 'context' ? 'tab-active' : ''}
-              onClick={() => setActiveTab('context')}
-            >
-              Context
-            </button>
-          </div>
-
-          {activeTab === 'models' ? (
-            <ModelManager
-              models={models}
-              defaultModel={defaultModel}
-              draftDefaultModel={draftDefaultModel}
-              onDraftDefaultModelChange={setDraftDefaultModel}
-              onRefreshModels={handleRefreshModels}
-              onSaveDefaultModel={handleSaveDefaultModel}
-              isRefreshing={isRefreshingModels}
-              isSavingDefault={isSavingDefaultModel}
+        <div className="home-camp-grid" role="list">
+          {visibleCamps.map((camp) => (
+            <CampCard
+              key={camp.id}
+              camp={camp}
+              promptPreview={campMetaById[camp.id]?.promptPreview ?? 'No context yet.'}
+              onOpen={() => navigate(`/camp/${camp.id}`)}
             />
-          ) : (
-            <ContextManager
-              globalFiles={globalContextFiles}
-              attachedFiles={attachedContextFiles}
-              selectedCampId={selectedCampId}
-              isRefreshing={isRefreshingContext}
-              isMutating={isMutatingContext}
-              onRefresh={handleRefreshContext}
-              onAttach={handleAttachContext}
-              onDetach={handleDetachContext}
-            />
-          )}
-        </section>
-      </main>
+          ))}
+          {visibleCamps.length === 0 ? <p className="empty-state">No camps match this search.</p> : null}
+        </div>
+      </section>
     </div>
   );
 }

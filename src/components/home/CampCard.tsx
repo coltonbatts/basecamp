@@ -5,9 +5,6 @@ import type { CampSummary } from '../../lib/types';
 type CampCardProps = {
   camp: CampSummary;
   promptPreview: string;
-  artifactCount?: number;
-  isActive: boolean;
-  onPreview: () => void;
   onOpen: () => void;
 };
 
@@ -47,7 +44,7 @@ export function CampCard(props: CampCardProps) {
 
   return (
     <article
-      className={`camp-card ${props.isActive ? 'camp-card-active' : ''}`}
+      className="camp-card"
       role="button"
       tabIndex={0}
       onClick={props.onOpen}
@@ -55,24 +52,18 @@ export function CampCard(props: CampCardProps) {
       aria-label={`Open ${props.camp.name}`}
     >
       <header className="camp-card-header">
-        <h3>{props.camp.name}</h3>
+        <div className="camp-card-title">
+          <h3>{props.camp.name}</h3>
+          <p>{props.camp.model}</p>
+        </div>
         <time dateTime={new Date(props.camp.updated_at).toISOString()}>{formatRelativeTime(props.camp.updated_at)}</time>
       </header>
 
-      <p className="camp-card-model">{props.camp.model}</p>
       <p className="camp-card-prompt">{props.promptPreview}</p>
 
       <footer className="camp-card-footer">
-        <span>{props.artifactCount ?? 0} artifacts</span>
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onPreview();
-          }}
-        >
-          Preview
-        </button>
+        <span>{new Date(props.camp.updated_at).toLocaleString()}</span>
+        <span>{props.camp.id}</span>
       </footer>
     </article>
   );
