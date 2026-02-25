@@ -162,7 +162,7 @@ export function RunForm({
       </div>
 
       {(localError || apiKeyMissing) && (
-        <p className="inline-warning">{localError ?? 'OpenRouter API key is missing. Set it in Settings.'}</p>
+        <p className="inline-warning">{localError ?? 'Provider credentials are missing. Configure them in Settings.'}</p>
       )}
 
       <div className="button-row">

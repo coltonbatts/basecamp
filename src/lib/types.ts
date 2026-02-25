@@ -1,3 +1,33 @@
+export type ProviderKind = 'openrouter' | 'lmstudio' | 'ollama' | 'llama_cpp';
+
+export type StreamProtocol = 'sse' | 'ndjson' | 'none';
+
+export type ProviderCapabilities = {
+  supports_tools: boolean;
+  supports_images: boolean;
+  supports_json_schema: boolean;
+  max_context_tokens?: number | null;
+  stream_protocol: StreamProtocol;
+};
+
+export type ProviderRegistryRow = {
+  provider_kind: ProviderKind;
+  base_url: string;
+  enabled: boolean;
+  last_ok_at: number | null;
+  last_error: string | null;
+};
+
+export type ProviderModelsRefreshItem = {
+  provider_kind: string;
+  count: number;
+};
+
+export type ProviderModelsRefreshResult = {
+  refreshed: ProviderModelsRefreshItem[];
+  total_count: number;
+};
+
 export type ModelOption = {
   id: string;
   label: string;
@@ -5,21 +35,27 @@ export type ModelOption = {
 };
 
 export type ModelRow = {
+  provider_kind: string;
+  model_id: string;
   id: string;
   name: string | null;
   description: string | null;
   context_length: number | null;
   pricing_json: string | null;
+  capabilities_json: string;
   raw_json: string;
   updated_at: number;
 };
 
 export type ModelRowPayload = {
+  provider_kind: string;
+  model_id: string;
   id: string;
   name: string | null;
   description: string | null;
   context_length: number | null;
   pricing_json: string | null;
+  capabilities_json: string;
   raw_json: string;
   updated_at: number;
 };
@@ -156,6 +192,13 @@ export type CampConfig = {
   id: string;
   name: string;
   model: string;
+  provider_kind?: string;
+  model_id?: string;
+  model_overrides?: {
+    temperature?: number;
+    max_tokens?: number;
+    top_p?: number;
+  } | null;
   tools_enabled: boolean;
   created_at: number;
   updated_at: number;

@@ -1,9 +1,9 @@
-import { openrouterSyncModels } from './db';
+import { providerRefreshModels } from './db';
 
 export async function syncModelsToDb(): Promise<{ count: number }> {
   try {
-    const result = await openrouterSyncModels();
-    return { count: result.count };
+    const result = await providerRefreshModels();
+    return { count: result.total_count };
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
       throw new Error((error as { message: string }).message);
@@ -13,6 +13,6 @@ export async function syncModelsToDb(): Promise<{ count: number }> {
       throw error;
     }
 
-    throw new Error('Unable to sync models from OpenRouter.');
+    throw new Error('Unable to refresh models from providers.');
   }
 }

@@ -18,6 +18,9 @@ import type {
   CampUpdateMemoryPayload,
   CampUpdateSystemPromptPayload,
   ModelRow,
+  ProviderKind,
+  ProviderModelsRefreshResult,
+  ProviderRegistryRow,
   Run,
   RunInsertPayload,
   RunSearchDbArgs,
@@ -46,7 +49,35 @@ export type OpenRouterModelsSyncResult = {
 };
 
 export async function openrouterSyncModels(): Promise<OpenRouterModelsSyncResult> {
-  return invoke<OpenRouterModelsSyncResult>('openrouter_sync_models');
+  const result = await providerRefreshModels('openrouter');
+  return {
+    count: result.total_count,
+    updated_at: Date.now(),
+  };
+}
+
+export async function providersList(): Promise<ProviderRegistryRow[]> {
+  return invoke<ProviderRegistryRow[]>('providers_list');
+}
+
+export async function providerUpdate(payload: {
+  provider_kind: ProviderKind;
+  enabled: boolean;
+  base_url: string;
+}): Promise<ProviderRegistryRow> {
+  return invoke<ProviderRegistryRow>('provider_update', { payload });
+}
+
+export async function providerHealthCheck(providerKind?: ProviderKind): Promise<ProviderRegistryRow[]> {
+  return invoke<ProviderRegistryRow[]>('provider_health_check', {
+    providerKind: providerKind ?? null,
+  });
+}
+
+export async function providerRefreshModels(providerKind?: ProviderKind): Promise<ProviderModelsRefreshResult> {
+  return invoke<ProviderModelsRefreshResult>('provider_refresh_models', {
+    providerKind: providerKind ?? null,
+  });
 }
 
 export async function insertRun(payload: RunInsertPayload): Promise<void> {

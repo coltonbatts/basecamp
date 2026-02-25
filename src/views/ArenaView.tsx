@@ -29,7 +29,7 @@ function ArenaTimer() {
 function modelDisplayLabel(model: ModelRow): string {
     const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
     const name = model.name?.trim() ? model.name : model.id;
-    return `${name}${ctx}`;
+    return `[${model.provider_kind ?? 'openrouter'}] ${name}${ctx}`;
 }
 
 export function ArenaView() {

@@ -3,6 +3,10 @@ import { useEffect, useState, type FormEvent } from 'react';
 import {
   getApprovalPolicy,
   getMaxIterations,
+  providerHealthCheck,
+  providerRefreshModels,
+  providersList,
+  providerUpdate,
   getToolsEnabled,
   getWorkspacePath,
   hasApiKey,
@@ -13,7 +17,7 @@ import {
   setToolsEnabled as persistToolsEnabled,
   setWorkspacePath,
 } from '../lib/db';
-import type { ApprovalPolicy } from '../lib/types';
+import type { ApprovalPolicy, ProviderKind, ProviderRegistryRow } from '../lib/types';
 import {
   getDeveloperInspectMode,
   setDeveloperInspectMode as persistDeveloperInspectMode,
@@ -35,6 +39,30 @@ function formatLastSync(lastSync: number | null): string {
   return new Date(lastSync).toLocaleString();
 }
 
+function providerTitle(kind: ProviderKind): string {
+  if (kind === 'openrouter') return 'OpenRouter';
+  if (kind === 'lmstudio') return 'LM Studio';
+  if (kind === 'ollama') return 'Ollama';
+  return 'llama.cpp';
+}
+
+function providerInstructionsUrl(kind: ProviderKind): string | null {
+  if (kind === 'lmstudio') return 'https://lmstudio.ai/docs/app/api/endpoints/openai';
+  if (kind === 'ollama') return 'https://ollama.com/download';
+  if (kind === 'llama_cpp') return 'https://github.com/ggerganov/llama.cpp/tree/master/examples/server';
+  return null;
+}
+
+function providerHealthLabel(provider: ProviderRegistryRow): string {
+  if (provider.last_error) {
+    return 'Down';
+  }
+  if (provider.last_ok_at) {
+    return 'Healthy';
+  }
+  return 'Unknown';
+}
+
 export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: SettingsProps) {
   const [apiKey, setApiKey] = useState('');
   const [loading, setLoading] = useState(true);
@@ -43,6 +71,11 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [savingToolsEnabled, setSavingToolsEnabled] = useState(false);
   const [savingDeveloperInspect, setSavingDeveloperInspect] = useState(false);
+  const [providers, setProviders] = useState<ProviderRegistryRow[]>([]);
+  const [providerDrafts, setProviderDrafts] = useState<Record<string, { enabled: boolean; base_url: string }>>({});
+  const [savingProviderKind, setSavingProviderKind] = useState<ProviderKind | null>(null);
+  const [checkingProviders, setCheckingProviders] = useState(false);
+  const [refreshingProviderModels, setRefreshingProviderModels] = useState(false);
   const [hasSavedKey, setHasSavedKey] = useState(false);
   const [workspacePath, setWorkspacePathState] = useState<string | null>(null);
   const [toolsEnabled, setToolsEnabledState] = useState(true);
@@ -61,13 +94,14 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setLoading(true);
 
       try {
-        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode, currentApprovalPolicy, currentMaxIterations] = await Promise.all([
+        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode, currentApprovalPolicy, currentMaxIterations, providerRows] = await Promise.all([
           hasApiKey(),
           getWorkspacePath(),
           getToolsEnabled(),
           getDeveloperInspectMode(),
           getApprovalPolicy(),
           getMaxIterations(),
+          providersList(),
         ]);
 
         setHasSavedKey(exists);
@@ -76,6 +110,18 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
         setDeveloperInspectModeState(currentDeveloperInspectMode);
         setApprovalPolicyState(currentApprovalPolicy as ApprovalPolicy);
         setMaxIterationsState(currentMaxIterations);
+        setProviders(providerRows);
+        setProviderDrafts(
+          Object.fromEntries(
+            providerRows.map((provider) => [
+              provider.provider_kind,
+              {
+                enabled: provider.enabled,
+                base_url: provider.base_url,
+              },
+            ]),
+          ),
+        );
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load settings state.');
       } finally {
@@ -118,11 +164,81 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
     try {
       const result = await syncModelsToDb();
       await onModelsSynced();
-      setStatus(`Synced ${result.count} models from OpenRouter.`);
+      setStatus(`Refreshed ${result.count} models from enabled providers.`);
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'Unable to sync models.');
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleProviderDraftChange = (
+    kind: ProviderKind,
+    next: Partial<{ enabled: boolean; base_url: string }>,
+  ) => {
+    setProviderDrafts((previous) => {
+      const current = previous[kind] ?? { enabled: false, base_url: '' };
+      return {
+        ...previous,
+        [kind]: {
+          ...current,
+          ...next,
+        },
+      };
+    });
+  };
+
+  const handleSaveProvider = async (kind: ProviderKind) => {
+    const draft = providerDrafts[kind];
+    if (!draft) {
+      return;
+    }
+    setSavingProviderKind(kind);
+    setError(null);
+    setStatus(null);
+    try {
+      await providerUpdate({
+        provider_kind: kind,
+        enabled: draft.enabled,
+        base_url: draft.base_url,
+      });
+      const latest = await providersList();
+      setProviders(latest);
+      setStatus(`${providerTitle(kind)} settings saved.`);
+    } catch (providerError) {
+      setError(providerError instanceof Error ? providerError.message : 'Unable to save provider settings.');
+    } finally {
+      setSavingProviderKind(null);
+    }
+  };
+
+  const handleCheckProviders = async () => {
+    setCheckingProviders(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const checked = await providerHealthCheck();
+      setProviders(checked);
+      setStatus('Provider health check complete.');
+    } catch (providerError) {
+      setError(providerError instanceof Error ? providerError.message : 'Unable to run provider health check.');
+    } finally {
+      setCheckingProviders(false);
+    }
+  };
+
+  const handleRefreshProviderModels = async () => {
+    setRefreshingProviderModels(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const refreshed = await providerRefreshModels();
+      await onModelsSynced();
+      setStatus(`Refreshed ${refreshed.total_count} cached models from providers.`);
+    } catch (providerError) {
+      setError(providerError instanceof Error ? providerError.message : 'Unable to refresh provider models.');
+    } finally {
+      setRefreshingProviderModels(false);
     }
   };
 
@@ -305,8 +421,71 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
             </div>
           )}
 
-          <p className="settings-note">Cached models: {cachedModelCount}</p>
-          <p className="settings-note">Last model sync: {formatLastSync(modelsLastSync)}</p>
+          <div className="settings-subsection">
+            <h3>Providers</h3>
+            <div className="button-row">
+              <button type="button" className="secondary" onClick={() => void handleCheckProviders()} disabled={checkingProviders}>
+                {checkingProviders ? 'Checking...' : 'Health Check'}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void handleRefreshProviderModels()}
+                disabled={refreshingProviderModels}
+              >
+                {refreshingProviderModels ? 'Refreshing...' : 'Refresh Models'}
+              </button>
+            </div>
+            {providers.map((provider) => {
+              const kind = provider.provider_kind;
+              const draft = providerDrafts[kind] ?? {
+                enabled: provider.enabled,
+                base_url: provider.base_url,
+              };
+              const instructionsUrl = providerInstructionsUrl(kind);
+              return (
+                <div key={kind} className="settings-subsection" style={{ border: '1px solid var(--line)', borderRadius: '8px', padding: '12px' }}>
+                  <p className="settings-note">
+                    <strong>{providerTitle(kind)}</strong> · {providerHealthLabel(provider)}
+                    {provider.last_ok_at ? ` · Last OK ${new Date(provider.last_ok_at).toLocaleString()}` : ''}
+                  </p>
+                  {provider.last_error ? <p className="inline-warning">{provider.last_error}</p> : null}
+                  <label className="settings-toggle">
+                    <input
+                      type="checkbox"
+                      checked={draft.enabled}
+                      onChange={(event) => handleProviderDraftChange(kind, { enabled: event.target.checked })}
+                    />
+                    <span>Enabled</span>
+                  </label>
+                  <label className="field">
+                    <span>Base URL</span>
+                    <input
+                      type="text"
+                      value={draft.base_url}
+                      onChange={(event) => handleProviderDraftChange(kind, { base_url: event.target.value })}
+                    />
+                  </label>
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveProvider(kind)}
+                      disabled={savingProviderKind === kind}
+                    >
+                      {savingProviderKind === kind ? 'Saving...' : 'Save Provider'}
+                    </button>
+                    {instructionsUrl ? (
+                      <a href={instructionsUrl} target="_blank" rel="noreferrer" className="secondary" style={{ alignSelf: 'center' }}>
+                        Open instructions
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+            <p className="settings-note">Cached models: {cachedModelCount}</p>
+            <p className="settings-note">Last model sync: {formatLastSync(modelsLastSync)}</p>
+          </div>
 
           <hr className="settings-divider" />
 

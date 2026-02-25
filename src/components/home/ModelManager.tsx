@@ -62,7 +62,7 @@ export function ModelManager(props: ModelManagerProps) {
         })}
       </div>
 
-      {props.models.length === 0 ? <p className="empty-state">No models cached. Refresh to fetch from OpenRouter.</p> : null}
+      {props.models.length === 0 ? <p className="empty-state">No models cached. Refresh to fetch from enabled providers.</p> : null}
     </section>
   );
 }

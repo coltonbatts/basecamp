@@ -10,9 +10,10 @@ import {
   dbListModels,
   ensureDefaultWorkspace,
   getDefaultModel,
+  providersList,
 } from '../lib/db';
 import { syncModelsToDb } from '../lib/models';
-import type { Camp, CampSummary, ModelRow } from '../lib/types';
+import type { Camp, CampSummary, ModelRow, ProviderRegistryRow } from '../lib/types';
 import './HomeView.css';
 
 const FALLBACK_MODEL = 'openrouter/auto';
@@ -63,7 +64,7 @@ function campPreview(camp: Camp): string {
 function modelDisplayLabel(model: ModelRow): string {
   const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
   const name = model.name?.trim() ? model.name : model.id;
-  return `${name}${ctx}`;
+  return `[${model.provider_kind}] ${name}${ctx}`;
 }
 
 export function HomeView() {
@@ -74,9 +75,11 @@ export function HomeView() {
   const [campMetaById, setCampMetaById] = useState<Record<string, HomeCampMeta>>({});
 
   const [models, setModels] = useState<ModelRow[]>([]);
+  const [providers, setProviders] = useState<ProviderRegistryRow[]>([]);
   const [defaultModel, setDefaultModel] = useState(FALLBACK_MODEL);
 
   const [newCampName, setNewCampName] = useState('New Camp');
+  const [newCampProviderFilter, setNewCampProviderFilter] = useState('all');
   const [newCampModel, setNewCampModel] = useState(FALLBACK_MODEL);
   const [campQuery, setCampQuery] = useState('');
 
@@ -92,6 +95,9 @@ export function HomeView() {
 
     options.set(FALLBACK_MODEL, FALLBACK_MODEL);
     for (const model of models) {
+      if (newCampProviderFilter !== 'all' && model.provider_kind !== newCampProviderFilter) {
+        continue;
+      }
       options.set(model.id, modelDisplayLabel(model));
     }
 
@@ -101,7 +107,12 @@ export function HomeView() {
     }
 
     return Array.from(options.entries()).map(([id, label]) => ({ id, label }));
-  }, [defaultModel, models]);
+  }, [defaultModel, models, newCampProviderFilter]);
+
+  const providerOptions = useMemo(
+    () => Array.from(new Set(models.map((model) => model.provider_kind))).sort((a, b) => a.localeCompare(b)),
+    [models],
+  );
 
   const visibleCamps = useMemo(() => {
     const normalizedQuery = campQuery.trim().toLowerCase();
@@ -129,6 +140,11 @@ export function HomeView() {
   const loadModels = useCallback(async () => {
     const rows = await dbListModels();
     setModels(rows);
+  }, []);
+
+  const loadProviders = useCallback(async () => {
+    const rows = await providersList();
+    setProviders(rows);
   }, []);
 
   const loadDefaultModel = useCallback(async () => {
@@ -166,7 +182,7 @@ export function HomeView() {
         const defaultWorkspacePath = await ensureDefaultWorkspace();
         setWorkspacePath(defaultWorkspacePath);
 
-        await Promise.all([loadModels(), loadDefaultModel(), loadCamps()]);
+        await Promise.all([loadModels(), loadDefaultModel(), loadCamps(), loadProviders()]);
       } catch (bootError) {
         setError(bootError instanceof Error ? bootError.message : 'Unable to load home view.');
       } finally {
@@ -175,7 +191,7 @@ export function HomeView() {
     };
 
     void boot();
-  }, [loadCamps, loadDefaultModel, loadModels]);
+  }, [loadCamps, loadDefaultModel, loadModels, loadProviders]);
 
   const handleCreateCamp = async () => {
     if (!workspacePath) {
@@ -225,8 +241,8 @@ export function HomeView() {
 
     try {
       const { count } = await syncModelsToDb();
-      await loadModels();
-      setStatus(`Refreshed ${count} models from OpenRouter.`);
+      await Promise.all([loadModels(), loadProviders()]);
+      setStatus(`Refreshed ${count} models from enabled providers.`);
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : 'Unable to refresh models.');
     } finally {
@@ -269,6 +285,18 @@ export function HomeView() {
         </label>
 
         <label>
+          <span>Provider</span>
+          <select value={newCampProviderFilter} onChange={(event) => setNewCampProviderFilter(event.target.value)}>
+            <option value="all">All providers</option>
+            {providerOptions.map((providerKind) => (
+              <option key={providerKind} value={providerKind}>
+                {providerKind}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
           <span>Model</span>
           <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
             {modelOptions.map((option) => (
@@ -283,6 +311,16 @@ export function HomeView() {
           {isCreatingCamp ? 'Creating Camp' : 'Create Camp'}
         </button>
       </section>
+
+      {providers.length > 0 ? (
+        <section className="home-create-camp" aria-label="Provider status">
+          {providers.map((provider) => (
+            <p key={provider.provider_kind} className={provider.last_error ? 'error-line' : 'status-line'}>
+              {provider.provider_kind}: {provider.last_error ? `offline (${provider.last_error})` : 'healthy'}
+            </p>
+          ))}
+        </section>
+      ) : null}
 
       <section className="home-camp-list" aria-label="Camp list">
         <header>

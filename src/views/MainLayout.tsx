@@ -29,6 +29,7 @@ import {
   dbListModels,
   ensureDefaultWorkspace,
   pickWorkspaceFolder,
+  providersList,
   setWorkspacePath,
 } from '../lib/db';
 import { runCampChatRuntime } from '../lib/campChatRuntime';
@@ -48,7 +49,7 @@ import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
 import { executeCampToolCall, executeMcpToolCall, getAllToolSpecs, getToolKind, isMcpToolName } from '../lib/tools';
 import { buildMcpToolEntry, setMcpTools } from '../lib/tools/registry';
-import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow, CampMessageAttachment } from '../lib/types';
+import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow, CampMessageAttachment, ProviderRegistryRow } from '../lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
@@ -81,7 +82,22 @@ function buildCorrelationId(): string {
 function modelDisplayLabel(model: ModelRow): string {
   const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
   const name = model.name?.trim() ? model.name : model.id;
-  return `${name}${ctx}`;
+  return `[${model.provider_kind ?? 'openrouter'}] ${name}${ctx}`;
+}
+
+function modelSupportsTools(model: ModelRow | null): boolean {
+  if (!model?.capabilities_json) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(model.capabilities_json) as { supports_tools?: unknown };
+    if (typeof parsed.supports_tools === 'boolean') {
+      return parsed.supports_tools;
+    }
+  } catch {
+    return true;
+  }
+  return true;
 }
 
 type ContextTreeNode = {
@@ -193,6 +209,7 @@ export function MainLayout() {
   const { id: routeCampId } = useParams<{ id: string }>();
   const [workspacePath, setWorkspacePathValue] = useState<string | null>(null);
   const [models, setModels] = useState<ModelRow[]>([]);
+  const [providerStatusRows, setProviderStatusRows] = useState<ProviderRegistryRow[]>([]);
   const [camps, setCamps] = useState<CampSummary[]>([]);
   const [selectedCampId, setSelectedCampId] = useState<string | null>(null);
   const [selectedCamp, setSelectedCamp] = useState<Camp | null>(null);
@@ -237,6 +254,19 @@ export function MainLayout() {
 
   const modelOptions = useMemo(() => (models.length > 0 ? models.map((model) => model.id) : [FALLBACK_MODEL]), [models]);
   const modelOptionsWithLabels = useMemo(() => (models.length > 0 ? models.map((model) => ({ id: model.id, label: modelDisplayLabel(model) })) : [{ id: FALLBACK_MODEL, label: FALLBACK_MODEL }]), [models]);
+  const selectedModelRow = useMemo(
+    () => models.find((model) => model.id === draftModel) ?? null,
+    [draftModel, models],
+  );
+  const selectedModelSupportsTools = useMemo(
+    () => modelSupportsTools(selectedModelRow),
+    [selectedModelRow],
+  );
+  const selectedProviderStatus = useMemo(() => {
+    const providerKind =
+      selectedModelRow?.provider_kind ?? (draftModel.includes('/') ? draftModel.split('/')[0] : 'openrouter');
+    return providerStatusRows.find((provider) => provider.provider_kind === providerKind) ?? null;
+  }, [draftModel, providerStatusRows, selectedModelRow]);
 
   const artifactById = useMemo(() => new Map(artifacts.map((artifact) => [artifact.id, artifact])), [artifacts]);
   const {
@@ -257,6 +287,11 @@ export function MainLayout() {
   const loadModels = useCallback(async () => {
     const rows = await dbListModels();
     setModels(rows);
+  }, []);
+
+  const loadProviders = useCallback(async () => {
+    const rows = await providersList();
+    setProviderStatusRows(rows);
   }, []);
 
   const loadCamps = useCallback(async () => {
@@ -326,7 +361,7 @@ export function MainLayout() {
   useEffect(() => {
     const boot = async () => {
       try {
-        await loadModels();
+        await Promise.all([loadModels(), loadProviders()]);
         const defaultWorkspacePath = await ensureDefaultWorkspace();
         setWorkspacePathValue(defaultWorkspacePath);
         await loadCamps();
@@ -336,7 +371,7 @@ export function MainLayout() {
     };
 
     void boot();
-  }, [loadCamps, loadModels]);
+  }, [loadCamps, loadModels, loadProviders]);
 
   // Discover MCP tools from registered servers on startup
   useEffect(() => {
@@ -591,6 +626,12 @@ export function MainLayout() {
       setDraftModel(modelOptions[0] ?? FALLBACK_MODEL);
     }
   }, [modelOptions, draftModel]);
+
+  useEffect(() => {
+    if (!selectedModelSupportsTools && draftToolsEnabled) {
+      setDraftToolsEnabled(false);
+    }
+  }, [selectedModelSupportsTools, draftToolsEnabled]);
 
   useEffect(() => {
     if (!routeCampId) { return; }
@@ -1002,7 +1043,7 @@ export function MainLayout() {
           camp_id: selectedCampId,
           name: draftName,
           model: draftModel,
-          tools_enabled: draftToolsEnabled,
+          tools_enabled: draftToolsEnabled && selectedModelSupportsTools,
         }),
       'Persist camp config before send',
     );
@@ -1028,6 +1069,7 @@ export function MainLayout() {
     draftName,
     draftSystemPrompt,
     draftToolsEnabled,
+    selectedModelSupportsTools,
     loadCamps,
     recordFileWriteForTurn,
     recordFileWritesForTurn,
@@ -1041,8 +1083,8 @@ export function MainLayout() {
 
     try {
       const { count } = await syncModelsToDb();
-      await loadModels();
-      setStatus(`Synced ${count} models.`);
+      await Promise.all([loadModels(), loadProviders()]);
+      setStatus(`Refreshed ${count} models from enabled providers.`);
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'Unable to sync models.');
     } finally {
@@ -1188,13 +1230,13 @@ export function MainLayout() {
           onToken: (token) => {
             setStreamingText((previous) => previous + token);
           },
-          tools: getAllToolSpecs(),
+          tools: selectedModelSupportsTools ? getAllToolSpecs() : undefined,
           correlationId: correlationId ?? undefined,
           onComposeStart: correlationId
             ? () => {
               void emitInspectEventForTurn(selectedCampId, correlationId, {
                 event_type: 'compose_start',
-                summary: 'Composing OpenRouter payload',
+                summary: 'Composing provider payload',
               });
             }
             : undefined,
@@ -1246,7 +1288,7 @@ export function MainLayout() {
 
                 void emitInspectEventForTurn(selectedCampId, correlationId, {
                   event_type: 'http_request_start',
-                  summary: `OpenRouter request (${httpEvent.message_count} messages)`,
+                  summary: `Provider request (${httpEvent.message_count} messages)`,
                   payload: {
                     model: httpEvent.request_payload.model,
                     message_count: httpEvent.message_count,
@@ -1256,6 +1298,8 @@ export function MainLayout() {
               },
               onHttpRequestEnd: (httpEvent) => {
                 const nextResponse = {
+                  provider_kind: httpEvent.provider_kind,
+                  base_url: httpEvent.base_url,
                   status_code: httpEvent.status,
                   duration_ms: httpEvent.duration_ms,
                   headers: httpEvent.response_headers,
@@ -1281,8 +1325,10 @@ export function MainLayout() {
                 void emitInspectEventForTurn(selectedCampId, correlationId, {
                   event_type: 'http_request_end',
                   duration_ms: httpEvent.duration_ms,
-                  summary: `OpenRouter response ${httpEvent.status}`,
+                  summary: `${httpEvent.provider_kind} response ${httpEvent.status}`,
                   payload: {
+                    provider_kind: httpEvent.provider_kind,
+                    base_url: httpEvent.base_url,
                     status_code: httpEvent.status,
                     stream: httpEvent.stream,
                     stream_chunk_count: httpEvent.stream_chunk_count ?? 0,
@@ -1301,6 +1347,7 @@ export function MainLayout() {
               },
               onHttpRequestError: (httpEvent) => {
                 const nextResponse = {
+                  provider_kind: httpEvent.provider_kind ?? null,
                   status_code: httpEvent.status ?? null,
                   duration_ms: httpEvent.duration_ms,
                   error: httpEvent.error_message,
@@ -1325,8 +1372,9 @@ export function MainLayout() {
                 void emitInspectEventForTurn(selectedCampId, correlationId, {
                   event_type: 'error',
                   duration_ms: httpEvent.duration_ms,
-                  summary: 'OpenRouter request failed',
+                  summary: 'Provider request failed',
                   payload: {
+                    provider_kind: httpEvent.provider_kind ?? null,
                     status_code: httpEvent.status ?? null,
                     error: httpEvent.error_message,
                     response: httpEvent.response_payload,
@@ -1763,6 +1811,25 @@ export function MainLayout() {
                     ))}
                   </select>
                 </label>
+                <label className="settings-toggle" style={{ marginTop: '6px', display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
+                  <input
+                    type="checkbox"
+                    checked={draftToolsEnabled}
+                    disabled={!selectedModelSupportsTools}
+                    onChange={(event) => setDraftToolsEnabled(event.target.checked)}
+                  />
+                  <span style={{ fontSize: '0.8rem' }}>Tools</span>
+                </label>
+                {!selectedModelSupportsTools ? (
+                  <p className="hint" style={{ marginTop: '4px' }}>
+                    This model does not support tool calls.
+                  </p>
+                ) : null}
+                {selectedProviderStatus?.last_error ? (
+                  <p className="error-line" style={{ marginTop: '4px' }}>
+                    Provider offline: {selectedProviderStatus.last_error}
+                  </p>
+                ) : null}
               </div>
             )}
           </div>

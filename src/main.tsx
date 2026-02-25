@@ -13,6 +13,7 @@ if (!window.__TAURI__) {
       console.log(`Mock invoked: ${cmd}`, args);
       if (cmd === 'camp_list') return [];
       if (cmd === 'db_list_models') return [];
+      if (cmd === 'providers_list' || cmd === 'provider_health_check') return [];
       if (cmd === 'get_default_model') return null;
       if (cmd === 'get_developer_inspect_mode') return false;
       if (cmd === 'ensure_default_workspace') return '/mock/workspace';
@@ -27,13 +28,21 @@ if (!window.__TAURI__) {
         };
       }
       if (cmd === 'camp_load') return {
-        id: 'test-camp',
-        name: 'Test Camp',
-        model: 'openrouter/auto',
-        tools_enabled: true,
-        created_at: Date.now(),
-        updated_at: Date.now(),
+        config: {
+          schema_version: '0.2',
+          id: 'test-camp',
+          name: 'Test Camp',
+          model: 'openrouter/auto',
+          provider_kind: 'openrouter',
+          model_id: 'auto',
+          tools_enabled: true,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        },
+        system_prompt: '',
+        memory: {},
         transcript: [],
+        context_path: '/mock/workspace/camps/test-camp/context',
       };
       if (cmd === 'camp_list_artifacts') return [];
       if (cmd.startsWith('inspect_') || cmd === 'set_developer_inspect_mode') return null;

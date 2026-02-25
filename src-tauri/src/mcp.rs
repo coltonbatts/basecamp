@@ -182,10 +182,8 @@ impl McpConnection {
                     return Err("MCP server closed stdout unexpectedly".to_string());
                 }
 
-                let response: JsonRpcResponse =
-                    serde_json::from_str(&response_line).map_err(|e| {
-                        format!("Failed to parse MCP server response: {e}")
-                    })?;
+                let response: JsonRpcResponse = serde_json::from_str(&response_line)
+                    .map_err(|e| format!("Failed to parse MCP server response: {e}"))?;
 
                 if let Some(err) = response.error {
                     return Err(format!(
@@ -244,7 +242,11 @@ impl McpConnection {
         }
     }
 
-    async fn send_notification(&mut self, method: &str, params: Option<Value>) -> Result<(), String> {
+    async fn send_notification(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
         match self {
             McpConnection::Stdio { stdin, .. } => {
                 let notification = JsonRpcNotification {
@@ -310,16 +312,14 @@ fn load_server_configs(connection: &Connection) -> Result<Vec<McpServerConfig>, 
 
     let mut configs = Vec::new();
     for row in rows {
-        let (id, name, transport_type, transport_config, enabled) = row.map_err(|e| e.to_string())?;
+        let (id, name, transport_type, transport_config, enabled) =
+            row.map_err(|e| e.to_string())?;
         let transport = match transport_type.as_str() {
             "stdio" => {
                 let parsed: Value =
                     serde_json::from_str(&transport_config).map_err(|e| e.to_string())?;
                 McpTransport::Stdio {
-                    command: parsed["command"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
+                    command: parsed["command"].as_str().unwrap_or_default().to_string(),
                     args: parsed["args"]
                         .as_array()
                         .map(|a| {
@@ -401,9 +401,7 @@ fn read_auth_token(server_id: &str) -> Option<String> {
 // Connection management
 // ---------------------------------------------------------------------------
 
-async fn connect_server(
-    config: &McpServerConfig,
-) -> Result<McpConnection, String> {
+async fn connect_server(config: &McpServerConfig) -> Result<McpConnection, String> {
     let auth_token = read_auth_token(&config.id);
 
     match &config.transport {
@@ -462,7 +460,8 @@ async fn initialize_connection(conn: &mut McpConnection) -> Result<(), String> {
     });
 
     let _result = conn.send_request("initialize", Some(init_params)).await?;
-    conn.send_notification("notifications/initialized", None).await?;
+    conn.send_notification("notifications/initialized", None)
+        .await?;
 
     Ok(())
 }
@@ -536,9 +535,7 @@ pub async fn mcp_register_server(
 }
 
 #[tauri::command]
-pub async fn mcp_list_servers(
-    state: State<'_, AppState>,
-) -> Result<Vec<McpServerStatus>, String> {
+pub async fn mcp_list_servers(state: State<'_, AppState>) -> Result<Vec<McpServerStatus>, String> {
     let configs = {
         let db = state.connection.lock().map_err(|e| e.to_string())?;
         load_server_configs(&db)?
@@ -695,7 +692,8 @@ mod tests {
 
     #[test]
     fn test_json_rpc_response_error() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
         let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();

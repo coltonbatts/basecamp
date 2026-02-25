@@ -28,31 +28,6 @@ const OpenRouterChatRequestSchema = z
   })
   .passthrough();
 
-const OpenRouterResponseSchema = z
-  .object({
-    model: z.string().optional(),
-    choices: z
-      .array(
-        z.object({
-          message: z
-            .object({
-              content: z.union([z.string(), z.array(z.unknown()), z.null()]).optional(),
-              tool_calls: z.array(z.unknown()).optional(),
-            })
-            .passthrough(),
-        }),
-      )
-      .min(1),
-    usage: z
-      .object({
-        prompt_tokens: z.number().optional(),
-        completion_tokens: z.number().optional(),
-        total_tokens: z.number().optional(),
-      })
-      .optional(),
-  })
-  .passthrough();
-
 export type OpenRouterToolSpec = {
   type: 'function';
   function: {
@@ -152,7 +127,7 @@ export type OpenRouterRunResult = {
 
 export type OpenRouterChatRunResult = OpenRouterRunResult & {
   assistantMessage: {
-    content: string | unknown[] | null;
+    content: OpenRouterChatMessage['content'];
     toolCalls: OpenRouterToolCall[];
   };
 };
@@ -188,6 +163,8 @@ export type OpenRouterHttpRequestEndEvent = {
   timestamp_ms: number;
   duration_ms: number;
   status: number;
+  provider_kind: string;
+  base_url: string;
   response_headers: Record<string, string>;
   request_payload: OpenRouterChatRequestPayload;
   response_payload: unknown;
@@ -199,6 +176,7 @@ export type OpenRouterHttpRequestErrorEvent = {
   timestamp_ms: number;
   duration_ms: number;
   status?: number;
+  provider_kind?: string;
   error_message: string;
   request_payload: OpenRouterChatRequestPayload;
   response_payload: unknown;
@@ -349,14 +327,24 @@ function callTelemetry(fn: (() => void) | undefined): void {
 }
 
 type OpenRouterCompletionCommandResult = {
+  provider_kind: string;
+  base_url: string;
   response_payload: unknown;
   output_text: string;
+  assistant_message: {
+    role: string;
+    content: unknown;
+    tool_calls: unknown[];
+  };
   usage: TokenUsage;
   resolved_model: string | null;
+  finish_reason?: string | null;
   status: number;
   duration_ms: number;
   response_headers: Record<string, string>;
   stream_chunk_count: number;
+  sanitized_request_payload?: unknown;
+  sanitized_response_payload?: unknown;
 };
 
 type OpenRouterCompletionCommandError = {
@@ -365,10 +353,67 @@ type OpenRouterCompletionCommandError = {
   response_payload: unknown;
 };
 
-type OpenRouterStreamEventPayload = {
-  type: 'token';
-  token: string;
+type ProviderKind = 'openrouter' | 'lmstudio' | 'ollama' | 'llama_cpp';
+
+type BasecampChatRequestPayload = {
+  provider_kind: ProviderKind;
+  model_id: string;
+  messages: OpenRouterChatMessage[];
+  tools?: OpenRouterToolSpec[];
+  tool_choice?: unknown;
+  temperature?: number;
+  max_tokens?: number;
+  top_p?: number;
+  stream: boolean;
+  metadata: {
+    correlation_id?: string;
+    provider_kind?: ProviderKind;
+  };
 };
+
+type OpenRouterStreamEventPayload =
+  | {
+    type: 'chat_delta';
+    correlation_id: string;
+    role: string;
+    content_delta: string;
+  }
+  | {
+    type: 'tool_call_delta';
+    correlation_id: string;
+    tool_call_id: string;
+    name?: string;
+    arguments_delta: string;
+  }
+  | {
+    type: 'chat_complete';
+    correlation_id: string;
+    usage: TokenUsage;
+    finish_reason?: string;
+  }
+  | {
+    type: 'chat_error';
+    correlation_id: string;
+    message: string;
+  };
+
+function parseModelReference(model: string): { providerKind: ProviderKind; modelId: string } {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    return { providerKind: 'openrouter', modelId: 'auto' };
+  }
+
+  const slashIndex = trimmed.indexOf('/');
+  if (slashIndex > 0) {
+    const prefix = trimmed.slice(0, slashIndex).toLowerCase();
+    const remainder = trimmed.slice(slashIndex + 1).trim();
+    if (remainder && (prefix === 'openrouter' || prefix === 'lmstudio' || prefix === 'ollama' || prefix === 'llama_cpp')) {
+      return { providerKind: prefix as ProviderKind, modelId: remainder };
+    }
+  }
+
+  return { providerKind: 'openrouter', modelId: trimmed };
+}
 
 function normalizeCommandError(error: unknown): OpenRouterCompletionCommandError {
   if (typeof error === 'object' && error !== null) {
@@ -425,6 +470,21 @@ async function invokeOpenRouterCompletion(
     ...validatedRequestPayload,
     stream,
   };
+  const modelRef = parseModelReference(commandRequestPayload.model);
+  const backendRequestPayload: BasecampChatRequestPayload = {
+    provider_kind: modelRef.providerKind,
+    model_id: modelRef.modelId,
+    messages: commandRequestPayload.messages,
+    tools: commandRequestPayload.tools,
+    tool_choice: commandRequestPayload.tool_choice,
+    temperature: commandRequestPayload.temperature,
+    max_tokens: commandRequestPayload.max_tokens,
+    stream,
+    metadata: {
+      correlation_id: options?.correlationId,
+      provider_kind: modelRef.providerKind,
+    },
+  };
 
   const startedAt = Date.now();
   let streamedChunkCount = 0;
@@ -440,20 +500,32 @@ async function invokeOpenRouterCompletion(
 
   const onEvent = new Channel<OpenRouterStreamEventPayload>();
   onEvent.onmessage = (event) => {
-    if (event.type !== 'token' || !event.token) {
+    if (event.type === 'chat_delta' && event.content_delta) {
+      streamedChunkCount += 1;
+      callTelemetry(() => {
+        options?.telemetry?.onStreamChunk?.(streamedChunkCount);
+      });
+      onToken(event.content_delta);
       return;
     }
 
-    streamedChunkCount += 1;
-    callTelemetry(() => {
-      options?.telemetry?.onStreamChunk?.(streamedChunkCount);
-    });
-    onToken(event.token);
+    if (event.type === 'chat_error') {
+      callTelemetry(() => {
+        options?.telemetry?.onHttpRequestError?.({
+          timestamp_ms: Date.now(),
+          duration_ms: Date.now() - startedAt,
+          error_message: event.message,
+          request_payload: commandRequestPayload,
+          response_payload: null,
+          stream,
+        });
+      });
+    }
   };
 
   try {
-    const result = await invoke<OpenRouterCompletionCommandResult>('stream_openrouter_completion', {
-      requestPayload: commandRequestPayload,
+    const result = await invoke<OpenRouterCompletionCommandResult>('cmd_send_chat', {
+      request: backendRequestPayload,
       onEvent,
     });
 
@@ -463,9 +535,11 @@ async function invokeOpenRouterCompletion(
         timestamp_ms: Date.now(),
         duration_ms: result.duration_ms,
         status: result.status,
+        provider_kind: result.provider_kind,
+        base_url: result.base_url,
         response_headers: result.response_headers ?? {},
         request_payload: commandRequestPayload,
-        response_payload: result.response_payload,
+        response_payload: result.sanitized_response_payload ?? result.response_payload,
         stream,
         stream_chunk_count: stream ? chunkCount : undefined,
       });
@@ -485,6 +559,7 @@ async function invokeOpenRouterCompletion(
         timestamp_ms: Date.now(),
         duration_ms: Date.now() - startedAt,
         status: parsed.status ?? undefined,
+        provider_kind: modelRef.providerKind,
         error_message: parsed.message,
         request_payload: commandRequestPayload,
         response_payload: parsed.response_payload,
@@ -528,13 +603,26 @@ export async function runOpenRouterChatCompletion(
 ): Promise<OpenRouterChatRunResult> {
   const { result } = await invokeOpenRouterCompletion(requestPayload, () => { }, options, false);
   const responsePayload = result.response_payload;
-  const parsed = OpenRouterResponseSchema.safeParse(responsePayload);
-  if (!parsed.success) {
-    throw new OpenRouterRequestError('OpenRouter response validation failed.', requestPayload, responsePayload);
-  }
-  const message = parsed.data.choices[0].message;
-  const toolCalls = parseToolCalls(message.tool_calls);
-  const normalizedContent = message.content ?? null;
+  const fallbackMessage =
+    typeof responsePayload === 'object' &&
+      responsePayload !== null &&
+      'choices' in (responsePayload as Record<string, unknown>) &&
+      Array.isArray((responsePayload as { choices?: unknown[] }).choices)
+      ? (
+        (responsePayload as {
+          choices?: Array<{ message?: { content?: OpenRouterChatMessage['content']; tool_calls?: unknown[] } }>;
+        }).choices?.[0]?.message ?? null
+      )
+      : null;
+
+  const assistantPayload = result.assistant_message ?? {
+    role: 'assistant',
+    content: fallbackMessage?.content ?? null,
+    tool_calls: fallbackMessage?.tool_calls ?? [],
+  };
+
+  const toolCalls = parseToolCalls(assistantPayload.tool_calls ?? []);
+  const normalizedContent = (assistantPayload.content ?? null) as OpenRouterChatMessage['content'];
 
   return {
     responsePayload,

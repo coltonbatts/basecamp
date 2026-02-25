@@ -18,6 +18,13 @@ use uuid::Uuid;
 
 mod inspect;
 pub mod mcp;
+mod providers;
+
+use providers::{
+    registry::{self, ProviderRegistryRow},
+    BasecampChatRequest, ChatStreamEvent, ProviderCommandError, ProviderKind, ProviderManager,
+    ProviderRuntimeSettings,
+};
 
 const KEYRING_SERVICE: &str = "com.basecamp.app";
 const KEYRING_ACCOUNT: &str = "openrouter_api_key";
@@ -31,7 +38,8 @@ const SETTING_MAX_ITERATIONS: &str = "max_iterations";
 const CAMP_RUN_STATE_FILE: &str = "run_state.jsonl";
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
 const LEGACY_CAMP_SCHEMA_VERSION: &str = "0.0";
-const CAMP_SCHEMA_VERSION: &str = "0.1";
+const PREVIOUS_CAMP_SCHEMA_VERSION: &str = "0.1";
+const CAMP_SCHEMA_VERSION: &str = "0.2";
 const CAMPS_DIR_NAME: &str = "camps";
 const WORKSPACE_CONTEXT_DIR: &str = "context";
 const CAMP_CONFIG_FILE: &str = "camp.json";
@@ -48,15 +56,20 @@ const DEFAULT_CAMP_MODEL: &str = "openrouter/auto";
 pub struct AppState {
     pub connection: Mutex<Connection>,
     pub mcp: tokio::sync::Mutex<mcp::McpConnections>,
+    pub provider_manager: ProviderManager,
+    pub provider_client: reqwest::Client,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ModelRow {
+    provider_kind: String,
+    model_id: String,
     id: String,
     name: Option<String>,
     description: Option<String>,
     context_length: Option<i64>,
     pricing_json: Option<String>,
+    capabilities_json: String,
     raw_json: String,
     updated_at: i64,
 }
@@ -118,11 +131,25 @@ struct WriteNoteResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct CampModelOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct CampConfig {
     schema_version: String,
     id: String,
     name: String,
     model: String,
+    provider_kind: String,
+    model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_overrides: Option<CampModelOverrides>,
     #[serde(default = "default_tools_enabled")]
     tools_enabled: bool,
     created_at: i64,
@@ -131,6 +158,24 @@ struct CampConfig {
 
 fn default_tools_enabled() -> bool {
     false
+}
+
+fn parse_model_reference(model_value: &str) -> (ProviderKind, String) {
+    let trimmed = model_value.trim();
+    if let Some((provider_prefix, model_id)) = trimmed.split_once('/') {
+        if let Some(provider_kind) = ProviderKind::parse(provider_prefix) {
+            let normalized_model_id = model_id.trim().to_string();
+            if !normalized_model_id.is_empty() {
+                return (provider_kind, normalized_model_id);
+            }
+        }
+    }
+
+    (ProviderKind::Openrouter, trimmed.to_string())
+}
+
+fn compose_model_reference(provider_kind: ProviderKind, model_id: &str) -> String {
+    format!("{}/{}", provider_kind.as_str(), model_id.trim())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -253,14 +298,22 @@ struct RunUpdatePayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct ModelRowPayload {
-    id: String,
-    name: Option<String>,
-    description: Option<String>,
-    context_length: Option<i64>,
-    pricing_json: Option<String>,
-    raw_json: String,
-    updated_at: i64,
+struct ProviderUpdatePayload {
+    provider_kind: String,
+    enabled: bool,
+    base_url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderModelsRefreshItem {
+    provider_kind: String,
+    count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProviderModelsRefreshResult {
+    refreshed: Vec<ProviderModelsRefreshItem>,
+    total_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -524,18 +577,6 @@ struct OpenRouterModelsSyncResult {
     updated_at: i64,
 }
 
-fn map_model_row(row: &Row<'_>) -> rusqlite::Result<ModelRow> {
-    Ok(ModelRow {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        description: row.get("description")?,
-        context_length: row.get("context_length")?,
-        pricing_json: row.get("pricing_json")?,
-        raw_json: row.get("raw_json")?,
-        updated_at: row.get("updated_at")?,
-    })
-}
-
 fn map_run_row(row: &Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         id: row.get("id")?,
@@ -662,16 +703,6 @@ fn create_tables(connection: &Connection) -> Result<(), rusqlite::Error> {
       tags TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS models (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      description TEXT,
-      context_length INTEGER,
-      pricing_json TEXT,
-      raw_json TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value INTEGER
@@ -699,6 +730,7 @@ fn create_tables(connection: &Connection) -> Result<(), rusqlite::Error> {
     ",
     )?;
 
+    registry::create_registry_tables(connection)?;
     mcp::create_mcp_servers_table(connection)?;
 
     Ok(())
@@ -706,6 +738,7 @@ fn create_tables(connection: &Connection) -> Result<(), rusqlite::Error> {
 
 fn migrate_database(connection: &Connection) -> Result<(), rusqlite::Error> {
     migrate_runs_table(connection)?;
+    registry::create_registry_tables(connection)?;
     Ok(())
 }
 
@@ -1383,6 +1416,89 @@ fn parse_timestamp_field(value: Option<&Value>) -> (Option<i64>, bool) {
     (None, true)
 }
 
+fn parse_optional_f64_field(value: Option<&Value>) -> (Option<f64>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+
+    if let Some(parsed) = raw_value.as_f64() {
+        if parsed.is_finite() {
+            return (Some(parsed), false);
+        }
+        return (None, true);
+    }
+
+    if let Some(raw_text) = raw_value.as_str() {
+        let trimmed = raw_text.trim();
+        if trimmed.is_empty() {
+            return (None, true);
+        }
+        if let Ok(parsed) = trimmed.parse::<f64>() {
+            if parsed.is_finite() {
+                return (Some(parsed), true);
+            }
+        }
+    }
+
+    (None, true)
+}
+
+fn parse_optional_i64_field(value: Option<&Value>) -> (Option<i64>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+
+    if let Some(parsed) = raw_value.as_i64() {
+        return (Some(parsed), false);
+    }
+    if let Some(parsed) = raw_value.as_u64() {
+        return (i64::try_from(parsed).ok(), false);
+    }
+    if let Some(raw_text) = raw_value.as_str() {
+        let trimmed = raw_text.trim();
+        if trimmed.is_empty() {
+            return (None, true);
+        }
+        if let Ok(parsed) = trimmed.parse::<i64>() {
+            return (Some(parsed), true);
+        }
+    }
+
+    (None, true)
+}
+
+fn parse_model_overrides_field(value: Option<&Value>) -> (Option<CampModelOverrides>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+    let Some(object) = raw_value.as_object() else {
+        return (None, true);
+    };
+
+    let mut migrated = false;
+    let (temperature, temp_migrated) = parse_optional_f64_field(object.get("temperature"));
+    migrated |= temp_migrated;
+    let (max_tokens, max_tokens_migrated) = parse_optional_i64_field(object.get("max_tokens"));
+    migrated |= max_tokens_migrated;
+    let (top_p, top_p_migrated) = parse_optional_f64_field(object.get("top_p"));
+    migrated |= top_p_migrated;
+
+    let overrides = CampModelOverrides {
+        temperature,
+        max_tokens,
+        top_p,
+    };
+
+    if overrides.temperature.is_none()
+        && overrides.max_tokens.is_none()
+        && overrides.top_p.is_none()
+    {
+        return (None, migrated || !object.is_empty());
+    }
+
+    (Some(overrides), migrated)
+}
+
 fn parse_string_list_field(value: Option<&Value>) -> Option<Vec<String>> {
     let array = value?.as_array()?;
     let mut normalized = Vec::new();
@@ -1649,12 +1765,12 @@ fn parse_camp_config_from_json(
     let schema_version = parse_non_empty_string_field(config_object.get("schema_version")).0;
     match schema_version.as_deref() {
         Some(CAMP_SCHEMA_VERSION) => {}
-        Some(LEGACY_CAMP_SCHEMA_VERSION) | None => {
+        Some(PREVIOUS_CAMP_SCHEMA_VERSION) | Some(LEGACY_CAMP_SCHEMA_VERSION) | None => {
             migrated = true;
         }
         Some(other) => {
             return Err(format!(
-                "Unsupported camp schema_version `{other}`. Supported versions: {LEGACY_CAMP_SCHEMA_VERSION}, {CAMP_SCHEMA_VERSION}."
+                "Unsupported camp schema_version `{other}`. Supported versions: {LEGACY_CAMP_SCHEMA_VERSION}, {PREVIOUS_CAMP_SCHEMA_VERSION}, {CAMP_SCHEMA_VERSION}."
             ));
         }
     }
@@ -1691,15 +1807,85 @@ fn parse_camp_config_from_json(
         }
     };
 
-    let (model_value, model_migrated) = parse_non_empty_string_field(config_object.get("model"));
-    migrated |= model_migrated;
-    let model = match model_value {
-        Some(value) => value,
-        None => {
-            migrated = true;
-            DEFAULT_CAMP_MODEL.to_string()
+    let mut inline_provider_kind: Option<String> = None;
+    let mut inline_model_id: Option<String> = None;
+    let mut inline_overrides: Option<CampModelOverrides> = None;
+    let mut model_from_string: Option<String> = None;
+
+    if let Some(model_field) = config_object.get("model") {
+        match model_field {
+            Value::String(raw_model) => {
+                let trimmed = raw_model.trim();
+                if trimmed.is_empty() {
+                    migrated = true;
+                } else {
+                    if trimmed != raw_model {
+                        migrated = true;
+                    }
+                    model_from_string = Some(trimmed.to_string());
+                }
+            }
+            Value::Object(model_object) => {
+                migrated = true;
+                let (provider_value, provider_migrated) =
+                    parse_non_empty_string_field(model_object.get("provider_kind"));
+                migrated |= provider_migrated;
+                inline_provider_kind = provider_value;
+
+                let (model_id_value, model_id_migrated) =
+                    parse_non_empty_string_field(model_object.get("model_id"));
+                migrated |= model_id_migrated;
+                inline_model_id = model_id_value;
+
+                let (overrides_value, overrides_migrated) =
+                    parse_model_overrides_field(model_object.get("overrides"));
+                migrated |= overrides_migrated;
+                inline_overrides = overrides_value;
+            }
+            _ => {
+                migrated = true;
+            }
         }
-    };
+    } else {
+        migrated = true;
+    }
+
+    let (provider_kind_value, provider_kind_migrated) =
+        parse_non_empty_string_field(config_object.get("provider_kind"));
+    migrated |= provider_kind_migrated;
+    let (model_id_value, model_id_migrated) =
+        parse_non_empty_string_field(config_object.get("model_id"));
+    migrated |= model_id_migrated;
+    let (model_overrides_value, model_overrides_migrated) =
+        parse_model_overrides_field(config_object.get("model_overrides"));
+    migrated |= model_overrides_migrated;
+
+    let provider_kind_raw = provider_kind_value
+        .or(inline_provider_kind)
+        .unwrap_or_else(|| {
+            parse_model_reference(model_from_string.as_deref().unwrap_or(DEFAULT_CAMP_MODEL))
+                .0
+                .as_str()
+                .to_string()
+        });
+    let provider_kind = ProviderKind::parse(&provider_kind_raw).unwrap_or_else(|| {
+        migrated = true;
+        ProviderKind::Openrouter
+    });
+
+    let inferred_model_id =
+        parse_model_reference(model_from_string.as_deref().unwrap_or(DEFAULT_CAMP_MODEL)).1;
+    let model_id = model_id_value.or(inline_model_id).unwrap_or_else(|| {
+        migrated = true;
+        inferred_model_id
+    });
+
+    let model = compose_model_reference(provider_kind, &model_id);
+    if model_from_string.as_deref() != Some(model.as_str()) {
+        migrated = true;
+    }
+
+    let model_overrides = model_overrides_value.or(inline_overrides);
 
     let (tools_enabled_value, tools_enabled_migrated) =
         parse_bool_field(config_object.get("tools_enabled"));
@@ -1747,6 +1933,9 @@ fn parse_camp_config_from_json(
             id,
             name,
             model,
+            provider_kind: provider_kind.as_str().to_string(),
+            model_id,
+            model_overrides,
             tools_enabled,
             created_at,
             updated_at,
@@ -2094,7 +2283,9 @@ fn require_api_key_from_keyring() -> Result<String, OpenRouterCommandError> {
         })
 }
 
-fn sanitize_openrouter_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+fn sanitize_openrouter_response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> BTreeMap<String, String> {
     let mut safe = BTreeMap::new();
     for (name, value) in headers {
         let key = name.as_str().to_ascii_lowercase();
@@ -2198,33 +2389,37 @@ fn to_reqwest_headers(headers: &BTreeMap<String, String>) -> reqwest::header::He
     mapped
 }
 
-fn parse_context_length(value: Option<&Value>) -> Option<i64> {
-    let raw = value?;
-    if let Some(number) = raw.as_i64() {
-        return Some(number.max(0));
-    }
-
-    if let Some(number) = raw.as_u64() {
-        return i64::try_from(number).ok();
-    }
-
-    if let Some(text) = raw.as_str() {
-        return text
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .map(|parsed| parsed.max(0));
-    }
-
-    None
+fn parse_provider_kind(value: &str) -> Result<ProviderKind, String> {
+    ProviderKind::parse(value).ok_or_else(|| {
+        format!(
+            "Unknown provider_kind `{}`. Expected one of: openrouter, lmstudio, ollama, llama_cpp.",
+            value
+        )
+    })
 }
 
-fn trim_optional_string(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(ToString::to_string)
+fn read_provider_runtime_settings(
+    connection: &Connection,
+    provider_kind: ProviderKind,
+) -> Result<ProviderRuntimeSettings, String> {
+    let row = registry::get_provider(connection, provider_kind)
+        .map_err(|err| format!("Unable to load provider settings: {err}"))?
+        .unwrap_or(ProviderRegistryRow {
+            provider_kind,
+            base_url: provider_kind.default_base_url().to_string(),
+            enabled: provider_kind == ProviderKind::Openrouter,
+            last_ok_at: None,
+            last_error: None,
+        });
+    let api_key = if provider_kind == ProviderKind::Openrouter {
+        read_api_key_from_keyring()?
+    } else {
+        None
+    };
+    Ok(ProviderRuntimeSettings {
+        config: registry::provider_to_runtime_config(&row),
+        api_key,
+    })
 }
 
 fn ensure_main_window(window: &Window) -> Result<(), String> {
@@ -2365,7 +2560,8 @@ async fn stream_openrouter_completion(
 
                     let next_usage = parse_openrouter_usage(&chunk_value);
                     usage.prompt_tokens = next_usage.prompt_tokens.or(usage.prompt_tokens);
-                    usage.completion_tokens = next_usage.completion_tokens.or(usage.completion_tokens);
+                    usage.completion_tokens =
+                        next_usage.completion_tokens.or(usage.completion_tokens);
                     usage.total_tokens = next_usage.total_tokens.or(usage.total_tokens);
 
                     let token = chunk_value
@@ -2485,152 +2681,382 @@ async fn openrouter_fetch_key_info() -> Result<Value, OpenRouterCommandError> {
 async fn openrouter_sync_models(
     state: State<'_, AppState>,
 ) -> Result<OpenRouterModelsSyncResult, OpenRouterCommandError> {
-    let api_key = require_api_key_from_keyring()?;
-    let client = reqwest::Client::new();
-    let response = client
-        .get("https://openrouter.ai/api/v1/models")
-        .headers(to_reqwest_headers(&openrouter_headers(&api_key)))
-        .send()
+    let refreshed = refresh_models_for_provider(&state, ProviderKind::Openrouter)
         .await
         .map_err(|err| OpenRouterCommandError {
-            message: format!("OpenRouter model sync request failed: {err}"),
+            message: err.message,
+            status: err.status,
+            response_payload: err.response_payload,
+        })?;
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| OpenRouterCommandError {
+            message: "Database lock error".to_string(),
             status: None,
             response_payload: Value::Null,
         })?;
+    let updated_at = registry::get_models_last_sync(&connection)
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("Unable to read models last sync: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?
+        .unwrap_or_else(now_timestamp_ms);
+    Ok(OpenRouterModelsSyncResult {
+        count: refreshed,
+        updated_at,
+    })
+}
 
-    let status = response.status().as_u16();
-    let is_success = response.status().is_success();
-    let payload = response.json::<Value>().await.unwrap_or(Value::Null);
-    if !is_success {
-        return Err(OpenRouterCommandError {
-            message: parse_openrouter_error_message(status, &payload),
-            status: Some(status),
-            response_payload: payload,
-        });
-    }
-
-    let raw_models = if payload.is_array() {
-        payload.as_array().cloned().unwrap_or_default()
-    } else {
-        payload
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| OpenRouterCommandError {
-                message: "OpenRouter model response is missing a model array.".to_string(),
-                status: Some(status),
-                response_payload: payload.clone(),
-            })?
+async fn refresh_models_for_provider(
+    state: &AppState,
+    provider_kind: ProviderKind,
+) -> Result<usize, ProviderCommandError> {
+    let settings = {
+        let connection = state.connection.lock().map_err(|_| ProviderCommandError {
+            message: "Database lock error".to_string(),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+        read_provider_runtime_settings(&connection, provider_kind).map_err(|message| {
+            ProviderCommandError {
+                message,
+                status: None,
+                response_payload: Value::Null,
+            }
+        })?
     };
 
-    let updated_at = now_timestamp_ms();
-    let mut model_rows = Vec::new();
-
-    for raw_model in raw_models {
-        let model_object = match raw_model.as_object() {
-            Some(value) => value,
-            None => continue,
-        };
-        let Some(model_id) = trim_optional_string(model_object.get("id")) else {
-            continue;
-        };
-
-        let pricing_json = model_object
-            .get("pricing")
-            .and_then(|pricing| serde_json::to_string(pricing).ok());
-        let raw_json = serde_json::to_string(&raw_model).unwrap_or_else(|_| "null".to_string());
-
-        model_rows.push(ModelRowPayload {
-            id: model_id,
-            name: trim_optional_string(model_object.get("name")),
-            description: trim_optional_string(model_object.get("description")),
-            context_length: parse_context_length(model_object.get("context_length")),
-            pricing_json,
-            raw_json,
-            updated_at,
-        });
+    if !settings.config.enabled {
+        return Ok(0);
     }
 
-    let mut connection = state.connection.lock().map_err(|_| OpenRouterCommandError {
+    let provider = state.provider_manager.get(provider_kind);
+    let models = match provider
+        .list_models(&state.provider_client, &settings)
+        .await
+    {
+        Ok(models) => models,
+        Err(error) => {
+            if let Ok(connection) = state.connection.lock() {
+                let _ = registry::update_provider_health(
+                    &connection,
+                    provider_kind,
+                    false,
+                    Some(&error.message),
+                );
+            }
+            return Err(error.into());
+        }
+    };
+
+    let mut connection = state.connection.lock().map_err(|_| ProviderCommandError {
         message: "Database lock error".to_string(),
         status: None,
         response_payload: Value::Null,
     })?;
 
-    let transaction = connection
-        .transaction()
-        .map_err(|err| OpenRouterCommandError {
-            message: format!("Unable to start model sync transaction: {err}"),
+    let count = registry::replace_models_for_provider(&mut connection, provider_kind, &models)
+        .map_err(|err| ProviderCommandError {
+            message: format!("Unable to update models cache: {err}"),
             status: None,
             response_payload: Value::Null,
         })?;
+    let _ = registry::update_provider_health(&connection, provider_kind, true, None);
+    Ok(count)
+}
 
-    {
-        let mut statement = transaction
-            .prepare(
-                "
-            INSERT OR REPLACE INTO models (
-              id,
-              name,
-              description,
-              context_length,
-              pricing_json,
-              raw_json,
-              updated_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ",
-            )
-            .map_err(|err| OpenRouterCommandError {
-                message: format!("Unable to prepare model sync statement: {err}"),
+async fn run_provider_health_check(
+    state: &AppState,
+    provider_kind: ProviderKind,
+) -> Result<ProviderRegistryRow, ProviderCommandError> {
+    let settings = {
+        let connection = state.connection.lock().map_err(|_| ProviderCommandError {
+            message: "Database lock error".to_string(),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+        read_provider_runtime_settings(&connection, provider_kind).map_err(|message| {
+            ProviderCommandError {
+                message,
                 status: None,
                 response_payload: Value::Null,
-            })?;
+            }
+        })?
+    };
 
-        for model in &model_rows {
-            statement
-                .execute(params![
-                    model.id,
-                    model.name,
-                    model.description,
-                    model.context_length,
-                    model.pricing_json,
-                    model.raw_json,
-                    model.updated_at,
-                ])
-                .map_err(|err| OpenRouterCommandError {
-                    message: format!("Unable to upsert model row: {err}"),
-                    status: None,
-                    response_payload: Value::Null,
-                })?;
-        }
-    }
+    let provider = state.provider_manager.get(provider_kind);
+    let health = provider
+        .health_check(&state.provider_client, &settings)
+        .await
+        .map_err(ProviderCommandError::from)?;
 
-    transaction.commit().map_err(|err| OpenRouterCommandError {
-        message: format!("Unable to commit model sync transaction: {err}"),
+    let connection = state.connection.lock().map_err(|_| ProviderCommandError {
+        message: "Database lock error".to_string(),
         status: None,
         response_payload: Value::Null,
     })?;
+    let mut row = registry::get_provider(&connection, provider_kind)
+        .map_err(|err| ProviderCommandError {
+            message: format!("Unable to load provider row: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?
+        .unwrap_or(ProviderRegistryRow {
+            provider_kind,
+            base_url: provider_kind.default_base_url().to_string(),
+            enabled: provider_kind == ProviderKind::Openrouter,
+            last_ok_at: None,
+            last_error: None,
+        });
+    row.last_ok_at = if health.ok {
+        Some(health.checked_at)
+    } else {
+        row.last_ok_at
+    };
+    row.last_error = if health.ok {
+        None
+    } else {
+        health.message.clone()
+    };
+    registry::upsert_provider(&connection, &row).map_err(|err| ProviderCommandError {
+        message: format!("Unable to persist provider health: {err}"),
+        status: None,
+        response_payload: Value::Null,
+    })?;
+    Ok(row)
+}
 
-    connection
-        .execute(
-            "
-          INSERT INTO meta (key, value)
-          VALUES ('models_last_sync', ?1)
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value
-          ",
-            params![updated_at],
-        )
-        .map_err(|err| OpenRouterCommandError {
-            message: format!("Unable to update model sync timestamp: {err}"),
+#[tauri::command]
+fn providers_list(state: State<'_, AppState>) -> Result<Vec<ProviderRegistryRow>, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    registry::list_providers(&connection).map_err(|err| format!("Unable to list providers: {err}"))
+}
+
+#[tauri::command]
+fn provider_update(
+    state: State<'_, AppState>,
+    payload: ProviderUpdatePayload,
+) -> Result<ProviderRegistryRow, String> {
+    let provider_kind = parse_provider_kind(&payload.provider_kind)?;
+    let base_url = payload.base_url.trim();
+    if base_url.is_empty() {
+        return Err("base_url cannot be empty.".to_string());
+    }
+
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let existing = registry::get_provider(&connection, provider_kind)
+        .map_err(|err| format!("Unable to read existing provider settings: {err}"))?;
+    let row = ProviderRegistryRow {
+        provider_kind,
+        base_url: base_url.to_string(),
+        enabled: payload.enabled,
+        last_ok_at: existing.as_ref().and_then(|value| value.last_ok_at),
+        last_error: existing.and_then(|value| value.last_error),
+    };
+    registry::upsert_provider(&connection, &row)
+        .map_err(|err| format!("Unable to save provider settings: {err}"))?;
+    registry::get_provider(&connection, provider_kind)
+        .map_err(|err| format!("Unable to load provider after update: {err}"))?
+        .ok_or_else(|| "Provider row missing after update.".to_string())
+}
+
+#[tauri::command]
+async fn provider_health_check(
+    state: State<'_, AppState>,
+    provider_kind: Option<String>,
+) -> Result<Vec<ProviderRegistryRow>, ProviderCommandError> {
+    let specific_kind_requested = provider_kind.is_some();
+    let kinds = match provider_kind.as_deref() {
+        Some(value) => {
+            vec![
+                parse_provider_kind(value).map_err(|message| ProviderCommandError {
+                    message,
+                    status: None,
+                    response_payload: Value::Null,
+                })?,
+            ]
+        }
+        None => vec![
+            ProviderKind::Openrouter,
+            ProviderKind::Lmstudio,
+            ProviderKind::Ollama,
+            ProviderKind::LlamaCpp,
+        ],
+    };
+
+    let mut rows = Vec::new();
+    for kind in kinds {
+        match run_provider_health_check(&state, kind).await {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                if specific_kind_requested {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn provider_refresh_models(
+    state: State<'_, AppState>,
+    provider_kind: Option<String>,
+) -> Result<ProviderModelsRefreshResult, ProviderCommandError> {
+    let specific_kind_requested = provider_kind.is_some();
+    let target_kinds = match provider_kind.as_deref() {
+        Some(value) => {
+            vec![
+                parse_provider_kind(value).map_err(|message| ProviderCommandError {
+                    message,
+                    status: None,
+                    response_payload: Value::Null,
+                })?,
+            ]
+        }
+        None => {
+            let connection = state.connection.lock().map_err(|_| ProviderCommandError {
+                message: "Database lock error".to_string(),
+                status: None,
+                response_payload: Value::Null,
+            })?;
+            registry::list_providers(&connection)
+                .map_err(|err| ProviderCommandError {
+                    message: format!("Unable to list providers: {err}"),
+                    status: None,
+                    response_payload: Value::Null,
+                })?
+                .into_iter()
+                .filter(|provider| provider.enabled)
+                .map(|provider| provider.provider_kind)
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let mut refreshed = Vec::new();
+    let mut total_count = 0usize;
+    for kind in target_kinds {
+        let _ = run_provider_health_check(&state, kind).await;
+        match refresh_models_for_provider(&state, kind).await {
+            Ok(count) => {
+                total_count += count;
+                refreshed.push(ProviderModelsRefreshItem {
+                    provider_kind: kind.as_str().to_string(),
+                    count,
+                });
+            }
+            Err(error) => {
+                if specific_kind_requested {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    Ok(ProviderModelsRefreshResult {
+        refreshed,
+        total_count,
+    })
+}
+
+#[tauri::command]
+async fn cmd_send_chat(
+    state: State<'_, AppState>,
+    request: BasecampChatRequest,
+    on_event: Channel<ChatStreamEvent>,
+) -> Result<providers::ProviderChatResponse, ProviderCommandError> {
+    let mut effective_request = request.clone();
+    let settings = {
+        let connection = state.connection.lock().map_err(|_| ProviderCommandError {
+            message: "Database lock error".to_string(),
             status: None,
             response_payload: Value::Null,
         })?;
+        let model_capabilities =
+            registry::get_model_capabilities(&connection, request.provider_kind, &request.model_id)
+                .map_err(|err| ProviderCommandError {
+                    message: format!("Unable to load model capabilities: {err}"),
+                    status: None,
+                    response_payload: Value::Null,
+                })?;
 
-    Ok(OpenRouterModelsSyncResult {
-        count: model_rows.len(),
-        updated_at,
-    })
+        let provider = state.provider_manager.get(request.provider_kind);
+        let supports_tools = model_capabilities
+            .as_ref()
+            .map(|caps| caps.supports_tools)
+            .unwrap_or_else(|| provider.supports_tools());
+        if !supports_tools {
+            effective_request.tools = None;
+            effective_request.tool_choice = None;
+        }
+        let supports_streaming = model_capabilities
+            .as_ref()
+            .map(|caps| caps.stream_protocol != providers::StreamProtocol::None)
+            .unwrap_or_else(|| provider.supports_streaming());
+        if effective_request.stream && !supports_streaming {
+            effective_request.stream = false;
+        }
+
+        read_provider_runtime_settings(&connection, request.provider_kind).map_err(|message| {
+            ProviderCommandError {
+                message,
+                status: None,
+                response_payload: Value::Null,
+            }
+        })?
+    };
+
+    if !settings.config.enabled {
+        return Err(ProviderCommandError {
+            message: format!(
+                "Provider `{}` is disabled in Settings.",
+                request.provider_kind.as_str()
+            ),
+            status: None,
+            response_payload: Value::Null,
+        });
+    }
+
+    let provider = state.provider_manager.get(request.provider_kind);
+    let response = match provider
+        .send_chat(
+            &state.provider_client,
+            &settings,
+            &effective_request,
+            if effective_request.stream {
+                Some(&on_event)
+            } else {
+                None
+            },
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if let Ok(connection) = state.connection.lock() {
+                let _ = registry::update_provider_health(
+                    &connection,
+                    request.provider_kind,
+                    false,
+                    Some(&error.message),
+                );
+            }
+            return Err(error.into());
+        }
+    };
+
+    if let Ok(connection) = state.connection.lock() {
+        let _ = registry::update_provider_health(&connection, request.provider_kind, true, None);
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -2805,29 +3231,23 @@ fn db_list_models(state: State<'_, AppState>) -> Result<Vec<ModelRow>, String> {
         .connection
         .lock()
         .map_err(|_| "Database lock error".to_string())?;
-    let mut statement = connection
-        .prepare(
-            "
-      SELECT
-        id,
-        name,
-        description,
-        context_length,
-        pricing_json,
-        raw_json,
-        updated_at
-      FROM models
-      ORDER BY LOWER(COALESCE(NULLIF(name, ''), id)) ASC, LOWER(id) ASC
-      ",
-        )
-        .map_err(|err| format!("Unable to prepare model list query: {err}"))?;
-
-    let rows = statement
-        .query_map([], map_model_row)
+    let rows = registry::list_models(&connection, None)
         .map_err(|err| format!("Unable to query model rows: {err}"))?;
-
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("Unable to map model rows: {err}"))
+    Ok(rows
+        .into_iter()
+        .map(|row| ModelRow {
+            provider_kind: row.provider_kind.as_str().to_string(),
+            model_id: row.model_id.clone(),
+            id: row.id,
+            name: row.display_name,
+            description: None,
+            context_length: row.context_length,
+            pricing_json: None,
+            capabilities_json: row.capabilities.to_json_string(),
+            raw_json: serde_json::to_string(&row.raw_json).unwrap_or_else(|_| "null".to_string()),
+            updated_at: row.last_seen_at,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -2836,14 +3256,7 @@ fn db_get_models_last_sync(state: State<'_, AppState>) -> Result<Option<i64>, St
         .connection
         .lock()
         .map_err(|_| "Database lock error".to_string())?;
-
-    connection
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'models_last_sync'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
+    registry::get_models_last_sync(&connection)
         .map_err(|err| format!("Unable to get models last sync: {err}"))
 }
 
@@ -3479,8 +3892,9 @@ fn tauri_cmd_read_context_file_base64(
         return Err("Requested path is not a file.".to_string());
     }
 
-    use base64::{Engine as _, engine::general_purpose};
-    let bytes = fs::read(&target).map_err(|err| format!("Unable to read binary context file: {err}"))?;
+    use base64::{engine::general_purpose, Engine as _};
+    let bytes =
+        fs::read(&target).map_err(|err| format!("Unable to read binary context file: {err}"))?;
     Ok(general_purpose::STANDARD.encode(bytes))
 }
 
@@ -3584,12 +3998,13 @@ fn tauri_cmd_write_context_file_bytes(
         }
     }
 
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     let bytes = general_purpose::STANDARD
         .decode(content_base64)
         .map_err(|err| format!("Invalid base64 encoding: {err}"))?;
 
-    fs::write(&target, bytes).map_err(|err| format!("Unable to write binary context file: {err}"))?;
+    fs::write(&target, bytes)
+        .map_err(|err| format!("Unable to write binary context file: {err}"))?;
     touch_camp_updated_at(&camp_dir)?;
     Ok(())
 }
@@ -3678,13 +4093,18 @@ fn camp_create(
     let camp_dir = camps_root.join(&camp_id);
 
     let name = validate_non_empty(&payload.name, "name")?;
-    let model = validate_non_empty(&payload.model, "model")?;
+    let model_value = validate_non_empty(&payload.model, "model")?;
+    let (provider_kind, model_id) = parse_model_reference(&model_value);
+    let model = compose_model_reference(provider_kind, &model_id);
     let now = now_timestamp_ms();
     let config = CampConfig {
         schema_version: CAMP_SCHEMA_VERSION.to_string(),
         id: camp_id,
         name,
         model,
+        provider_kind: provider_kind.as_str().to_string(),
+        model_id,
+        model_overrides: None,
         tools_enabled: payload.tools_enabled.unwrap_or(default_tools_enabled()),
         created_at: now,
         updated_at: now,
@@ -3741,7 +4161,11 @@ fn camp_update_config(
 
     let mut config = read_camp_config(&camp_dir)?;
     config.name = validate_non_empty(&payload.name, "name")?;
-    config.model = validate_non_empty(&payload.model, "model")?;
+    let model_value = validate_non_empty(&payload.model, "model")?;
+    let (provider_kind, model_id) = parse_model_reference(&model_value);
+    config.model = compose_model_reference(provider_kind, &model_id);
+    config.provider_kind = provider_kind.as_str().to_string();
+    config.model_id = model_id;
     config.tools_enabled = payload.tools_enabled;
     config.updated_at = now_timestamp_ms();
 
@@ -4146,7 +4570,11 @@ fn run_start(
 }
 
 #[tauri::command]
-fn run_cancel(state: State<'_, AppState>, camp_id: String, run_id: String) -> Result<Value, String> {
+fn run_cancel(
+    state: State<'_, AppState>,
+    camp_id: String,
+    run_id: String,
+) -> Result<Value, String> {
     let connection = state
         .connection
         .lock()
@@ -4262,6 +4690,8 @@ pub fn run() {
             app.manage(AppState {
                 connection: Mutex::new(connection),
                 mcp: tokio::sync::Mutex::new(mcp::McpConnections::new()),
+                provider_manager: ProviderManager::new(),
+                provider_client: reqwest::Client::new(),
             });
 
             // Handle the splash screen
@@ -4285,6 +4715,11 @@ pub fn run() {
             stream_openrouter_completion,
             openrouter_fetch_key_info,
             openrouter_sync_models,
+            providers_list,
+            provider_update,
+            provider_health_check,
+            provider_refresh_models,
+            cmd_send_chat,
             insert_run,
             list_runs,
             get_run_by_id,
@@ -4527,6 +4962,9 @@ mod tests {
         assert_eq!(loaded.id, "camp-legacy");
         assert_eq!(loaded.name, "Legacy Camp");
         assert_eq!(loaded.model, "openrouter/auto");
+        assert_eq!(loaded.provider_kind, "openrouter");
+        assert_eq!(loaded.model_id, "auto");
+        assert!(loaded.model_overrides.is_none());
         assert!(!loaded.tools_enabled);
         assert_eq!(loaded.created_at, 1_700_000_000_000);
         assert_eq!(loaded.updated_at, 1_700_000_001_000);
