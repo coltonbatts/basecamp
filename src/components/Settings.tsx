@@ -24,6 +24,7 @@ import {
 } from '../lib/inspect';
 import { fetchOpenRouterKeyInfo, type OpenRouterKeyInfo } from '../lib/openrouter';
 import { syncModelsToDb } from '../lib/models';
+import { Field } from './ui/Field';
 
 type SettingsProps = {
   cachedModelCount: number;
@@ -369,8 +370,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
           <p className="settings-note">Saved key status: {hasSavedKey ? 'Configured' : 'Not configured'}</p>
 
           <form onSubmit={handleSave} className="settings-form">
-            <label className="field">
-              <span>OpenRouter API Key</span>
+            <Field label="OpenRouter API Key">
               <input
                 type="password"
                 value={apiKey}
@@ -378,7 +378,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
                 autoComplete="off"
                 placeholder="OpenRouter API key"
               />
-            </label>
+            </Field>
 
             <div className="button-row">
               <button type="submit" disabled={saving}>
@@ -458,14 +458,13 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
                     />
                     <span>Enabled</span>
                   </label>
-                  <label className="field">
-                    <span>Base URL</span>
+                  <Field label="Base URL">
                     <input
                       type="text"
                       value={draft.base_url}
                       onChange={(event) => handleProviderDraftChange(kind, { base_url: event.target.value })}
                     />
-                  </label>
+                  </Field>
                   <div className="button-row">
                     <button
                       type="button"
@@ -531,8 +530,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
           <hr className="settings-divider" />
 
           <div className="settings-subsection">
-            <label className="field">
-              <span>Approval Policy</span>
+            <Field label="Approval Policy">
               <select
                 value={approvalPolicy}
                 disabled={savingApprovalPolicy}
@@ -544,13 +542,12 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
                 <option value="auto-safe">Auto-safe — auto-approve read-only tools</option>
                 <option value="full-auto">Full-auto — auto-approve all tools</option>
               </select>
-            </label>
+            </Field>
             <p className="settings-note">Controls whether agent tool calls require manual approval before execution.</p>
           </div>
 
           <div className="settings-subsection">
-            <label className="field">
-              <span>Max Iterations per Run</span>
+            <Field label="Max Iterations per Run">
               <input
                 type="number"
                 min={1}
@@ -564,7 +561,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
                   }
                 }}
               />
-            </label>
+            </Field>
             <p className="settings-note">Maximum tool-use loop iterations per agent run (1–50, default 10).</p>
           </div>
         </>

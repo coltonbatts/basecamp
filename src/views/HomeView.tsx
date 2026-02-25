@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { CampCard } from '../components/home/CampCard';
+import { Field } from '../components/ui/Field';
 import {
   campCreate,
   campList,
@@ -274,18 +275,16 @@ export function HomeView() {
       {error ? <p className="error-line">{error}</p> : null}
 
       <section className="home-create-camp" aria-label="Create camp">
-        <label>
-          <span>Camp Name</span>
+        <Field label="Camp Name">
           <input
             value={newCampName}
             onChange={(event) => setNewCampName(event.target.value)}
             placeholder="New Camp"
             aria-label="New camp name"
           />
-        </label>
+        </Field>
 
-        <label>
-          <span>Provider</span>
+        <Field label="Provider">
           <select value={newCampProviderFilter} onChange={(event) => setNewCampProviderFilter(event.target.value)}>
             <option value="all">All providers</option>
             {providerOptions.map((providerKind) => (
@@ -294,10 +293,9 @@ export function HomeView() {
               </option>
             ))}
           </select>
-        </label>
+        </Field>
 
-        <label>
-          <span>Model</span>
+        <Field label="Model">
           <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
             {modelOptions.map((option) => (
               <option key={option.id} value={option.id}>
@@ -305,10 +303,10 @@ export function HomeView() {
               </option>
             ))}
           </select>
-        </label>
+        </Field>
 
         <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={isCreatingCamp || isBooting}>
-          {isCreatingCamp ? 'Creating Camp' : 'Create Camp'}
+          {isCreatingCamp ? 'INITIALIZING CAMP...' : 'ESTABLISH BASECAMP'}
         </button>
       </section>
 
@@ -327,15 +325,14 @@ export function HomeView() {
           <h2>Camps</h2>
           <div>
             <span>{visibleCamps.length} shown</span>
-            <label>
-              <span>Search</span>
+            <Field label="Search">
               <input
                 value={campQuery}
                 onChange={(event) => setCampQuery(event.target.value)}
                 placeholder="Search camps"
                 aria-label="Search camps"
               />
-            </label>
+            </Field>
           </div>
         </header>
 

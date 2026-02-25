@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 
 import type { InspectCampFileMeta, InspectEventRecord } from '../lib/inspect';
+import { TabsList, TabsPanel, TabsRoot, TabsTrigger } from './ui/Tabs';
 
 type InspectFileWrite = {
   path: string;
@@ -27,6 +28,10 @@ type InspectPanelProps = {
 };
 
 type InspectTab = 'timeline' | 'request' | 'response' | 'files' | 'errors';
+
+function isInspectTab(value: string): value is InspectTab {
+  return value === 'timeline' || value === 'request' || value === 'response' || value === 'files' || value === 'errors';
+}
 
 function formatTs(timestampMs: number): string {
   return new Date(timestampMs).toLocaleTimeString();
@@ -95,87 +100,91 @@ export function InspectPanel({ enabled, turn, exporting, exportError, onExport }
           {turn?.exportPath ? <p className="hint">Bundle: {turn.exportPath}</p> : null}
           {exportError ? <p className="tool-queue-error">{exportError}</p> : null}
 
-          <div className="inspect-tabs" role="tablist" aria-label="Inspect tabs">
-            {tabs.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                className={tab === entry.id ? 'active' : ''}
-                onClick={() => setTab(entry.id)}
-              >
-                {entry.label}
-              </button>
-            ))}
-          </div>
+          <TabsRoot
+            value={tab}
+            onValueChange={(nextValue) => {
+              if (isInspectTab(nextValue)) {
+                setTab(nextValue);
+              }
+            }}
+          >
+            <TabsList className="inspect-tabs" aria-label="Inspect tabs">
+              {tabs.map((entry) => (
+                <TabsTrigger key={entry.id} value={entry.id}>
+                  {entry.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
 
-          {tab === 'timeline' ? (
-            <div className="inspect-list">
-              {turn?.events.length ? (
-                turn.events.map((event, index) => (
-                  <article key={`${event.timestamp_ms}-${event.event_type}-${index}`} className="inspect-item">
-                    <header>
-                      <strong>{event.event_type}</strong>
-                      <span>{formatTs(event.timestamp_ms)}</span>
-                    </header>
-                    <p className="hint">{event.summary}</p>
-                    <p className="hint">
-                      correlation_id: {event.correlation_id}
-                      {typeof event.duration_ms === 'number' ? ` · ${event.duration_ms}ms` : ''}
-                    </p>
-                  </article>
-                ))
-              ) : (
-                <p className="hint">No events for this turn yet.</p>
-              )}
-            </div>
-          ) : null}
+            <TabsPanel value="timeline" className="inspect-tab-panel">
+              <div className="inspect-list">
+                {turn?.events.length ? (
+                  turn.events.map((event, index) => (
+                    <article key={`${event.timestamp_ms}-${event.event_type}-${index}`} className="inspect-item">
+                      <header>
+                        <strong>{event.event_type}</strong>
+                        <span>{formatTs(event.timestamp_ms)}</span>
+                      </header>
+                      <p className="hint">{event.summary}</p>
+                      <p className="hint">
+                        correlation_id: {event.correlation_id}
+                        {typeof event.duration_ms === 'number' ? ` · ${event.duration_ms}ms` : ''}
+                      </p>
+                    </article>
+                  ))
+                ) : (
+                  <p className="hint">No events for this turn yet.</p>
+                )}
+              </div>
+            </TabsPanel>
 
-          {tab === 'request' ? (
-            <pre className="inspect-json">{toPrettyJson({
-              composed_input_breakdown: turn?.composedInputBreakdown ?? null,
-              openrouter_request_json: turn?.requestPayload ?? null,
-            })}</pre>
-          ) : null}
+            <TabsPanel value="request" className="inspect-tab-panel">
+              <pre className="inspect-json">{toPrettyJson({
+                composed_input_breakdown: turn?.composedInputBreakdown ?? null,
+                openrouter_request_json: turn?.requestPayload ?? null,
+              })}</pre>
+            </TabsPanel>
 
-          {tab === 'response' ? (
-            <pre className="inspect-json">{toPrettyJson(turn?.responsePayload ?? null)}</pre>
-          ) : null}
+            <TabsPanel value="response" className="inspect-tab-panel">
+              <pre className="inspect-json">{toPrettyJson(turn?.responsePayload ?? null)}</pre>
+            </TabsPanel>
 
-          {tab === 'files' ? (
-            <div className="inspect-list">
-              {turn?.filesWritten.length ? (
-                turn.filesWritten.map((entry) => (
-                  <article key={entry.path} className="inspect-item">
-                    <header>
-                      <strong>{entry.path}</strong>
-                    </header>
-                    <p className="hint">Before: {fileStatSummary(entry.before)}</p>
-                    <p className="hint">After: {fileStatSummary(entry.after)}</p>
-                  </article>
-                ))
-              ) : (
-                <p className="hint">No file writes recorded for this turn yet.</p>
-              )}
-            </div>
-          ) : null}
+            <TabsPanel value="files" className="inspect-tab-panel">
+              <div className="inspect-list">
+                {turn?.filesWritten.length ? (
+                  turn.filesWritten.map((entry) => (
+                    <article key={entry.path} className="inspect-item">
+                      <header>
+                        <strong>{entry.path}</strong>
+                      </header>
+                      <p className="hint">Before: {fileStatSummary(entry.before)}</p>
+                      <p className="hint">After: {fileStatSummary(entry.after)}</p>
+                    </article>
+                  ))
+                ) : (
+                  <p className="hint">No file writes recorded for this turn yet.</p>
+                )}
+              </div>
+            </TabsPanel>
 
-          {tab === 'errors' ? (
-            <div className="inspect-list">
-              {errorEvents.length > 0 ? (
-                errorEvents.map((event, index) => (
-                  <article key={`${event.timestamp_ms}-${index}`} className="inspect-item">
-                    <header>
-                      <strong>{event.summary}</strong>
-                      <span>{formatTs(event.timestamp_ms)}</span>
-                    </header>
-                    <pre className="inspect-json">{toPrettyJson(event.payload ?? null)}</pre>
-                  </article>
-                ))
-              ) : (
-                <p className="hint">No errors recorded for this turn.</p>
-              )}
-            </div>
-          ) : null}
+            <TabsPanel value="errors" className="inspect-tab-panel">
+              <div className="inspect-list">
+                {errorEvents.length > 0 ? (
+                  errorEvents.map((event, index) => (
+                    <article key={`${event.timestamp_ms}-${index}`} className="inspect-item">
+                      <header>
+                        <strong>{event.summary}</strong>
+                        <span>{formatTs(event.timestamp_ms)}</span>
+                      </header>
+                      <pre className="inspect-json">{toPrettyJson(event.payload ?? null)}</pre>
+                    </article>
+                  ))
+                ) : (
+                  <p className="hint">No errors recorded for this turn.</p>
+                )}
+              </div>
+            </TabsPanel>
+          </TabsRoot>
         </div>
       </details>
     </section>

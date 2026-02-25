@@ -1,4 +1,5 @@
 import type { ModelOption } from '../lib/types';
+import { Field } from './ui/Field';
 
 type ModelPickerProps = {
   models: ModelOption[];
@@ -8,8 +9,7 @@ type ModelPickerProps = {
 
 export function ModelPicker({ models, value, onChange }: ModelPickerProps) {
   return (
-    <label className="field">
-      <span>Model</span>
+    <Field label="Model">
       <select value={value} onChange={(event) => onChange(event.target.value)}>
         {models.map((model) => (
           <option key={model.id} value={model.id}>
@@ -17,6 +17,6 @@ export function ModelPicker({ models, value, onChange }: ModelPickerProps) {
           </option>
         ))}
       </select>
-    </label>
+    </Field>
   );
 }

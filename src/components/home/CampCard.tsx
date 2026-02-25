@@ -1,5 +1,3 @@
-import type { KeyboardEvent } from 'react';
-
 import type { CampSummary } from '../../lib/types';
 
 type CampCardProps = {
@@ -36,53 +34,35 @@ function formatRelativeTime(ts: number): string {
 }
 
 export function CampCard(props: CampCardProps) {
-  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      props.onOpen();
-    }
-  };
-
   return (
-    <article
-      className="camp-card"
-      role="button"
-      tabIndex={0}
-      onClick={props.onOpen}
-      onKeyDown={handleKeyDown}
-      aria-label={`Open ${props.camp.name}`}
-    >
-      <header className="camp-card-header">
-        <div className="camp-card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', width: '100%' }}>
-          <div>
+    <article className="camp-card">
+      {props.onDelete && (
+        <button
+          type="button"
+          className="delete-action camp-card-delete"
+          onClick={props.onDelete}
+          aria-label={`Delete ${props.camp.name}`}
+        >
+          Delete
+        </button>
+      )}
+
+      <button type="button" className="camp-card-open" onClick={props.onOpen} aria-label={`Open ${props.camp.name}`}>
+        <header className="camp-card-header">
+          <div className="camp-card-title">
             <h3>{props.camp.name}</h3>
             <p>{props.camp.model}</p>
           </div>
-          {props.onDelete && (
-            <button
-              type="button"
-              className="delete-action"
-              style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-1) var(--space-2)' }}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                props.onDelete?.();
-              }}
-              aria-label={`Delete ${props.camp.name}`}
-            >
-              Delete
-            </button>
-          )}
-        </div>
-        <time dateTime={new Date(props.camp.updated_at).toISOString()}>{formatRelativeTime(props.camp.updated_at)}</time>
-      </header>
+          <time dateTime={new Date(props.camp.updated_at).toISOString()}>{formatRelativeTime(props.camp.updated_at)}</time>
+        </header>
 
-      <p className="camp-card-prompt">{props.promptPreview}</p>
+        <p className="camp-card-prompt">{props.promptPreview}</p>
 
-      <footer className="camp-card-footer">
-        <span>{new Date(props.camp.updated_at).toLocaleString()}</span>
-        <span>{props.camp.id}</span>
-      </footer>
+        <footer className="camp-card-footer">
+          <span>{new Date(props.camp.updated_at).toLocaleString()}</span>
+          <span>{props.camp.id}</span>
+        </footer>
+      </button>
     </article>
   );
 }

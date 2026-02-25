@@ -2,6 +2,7 @@ import { useMemo, useState, type FormEvent, type KeyboardEvent } from 'react';
 
 import type { ModelOption, RunFormValues } from '../lib/types';
 import { ModelPicker } from './ModelPicker';
+import { Field } from './ui/Field';
 
 type RunFormProps = {
   models: ModelOption[];
@@ -103,8 +104,7 @@ export function RunForm({
       {cachedModelCount === 0 && <p className="inline-warning">No models cached. Go to Settings and Sync Models.</p>}
       {modelsLoadError && <p className="inline-warning">{modelsLoadError}</p>}
       {selectedModel === AUTO_MODEL_ID && fallbackModelOptions.length > 0 && (
-        <label className="field">
-          <span>Auto Fallback Model</span>
+        <Field label="Auto Fallback Model">
           <select value={selectedFallbackModel} onChange={(event) => setFallbackModel(event.target.value)}>
             {fallbackModelOptions.map((option) => (
               <option key={option.id} value={option.id}>
@@ -112,21 +112,19 @@ export function RunForm({
               </option>
             ))}
           </select>
-        </label>
+        </Field>
       )}
 
-      <label className="field">
-        <span>System Prompt (optional)</span>
+      <Field label="System Prompt (optional)">
         <textarea
           value={systemPrompt}
           onChange={(event) => setSystemPrompt(event.target.value)}
           rows={4}
           placeholder="You are an expert assistant..."
         />
-      </label>
+      </Field>
 
-      <label className="field">
-        <span>User Prompt</span>
+      <Field label="User Prompt">
         <textarea
           value={userPrompt}
           onChange={(event) => setUserPrompt(event.target.value)}
@@ -134,11 +132,10 @@ export function RunForm({
           placeholder="Ask something..."
           required
         />
-      </label>
+      </Field>
 
       <div className="inline-grid">
-        <label className="field">
-          <span>Temperature</span>
+        <Field label="Temperature">
           <input
             type="number"
             value={temperature}
@@ -147,10 +144,9 @@ export function RunForm({
             step={0.1}
             onChange={(event) => setTemperature(parseNumber(event.target.value, DEFAULT_TEMPERATURE))}
           />
-        </label>
+        </Field>
 
-        <label className="field">
-          <span>Max Tokens</span>
+        <Field label="Max Tokens">
           <input
             type="number"
             value={maxTokens}
@@ -158,7 +154,7 @@ export function RunForm({
             step={1}
             onChange={(event) => setMaxTokens(parseNumber(event.target.value, DEFAULT_MAX_TOKENS))}
           />
-        </label>
+        </Field>
       </div>
 
       {(localError || apiKeyMissing) && (

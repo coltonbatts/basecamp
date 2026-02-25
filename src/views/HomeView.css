@@ -59,9 +59,9 @@ h2 {
 .home-create-camp {
   border: var(--border-width) solid var(--line);
   background: var(--bg);
-  padding: var(--space-4);
+  padding: var(--space-5);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 400px) auto;
+  grid-template-columns: 1fr 1fr;
   gap: var(--space-4);
   align-items: end;
 }
@@ -120,38 +120,47 @@ h2 {
 }
 
 .home-dashboard .camp-card {
+  position: relative;
+}
+
+.home-dashboard .camp-card .camp-card-open {
+  width: 100%;
   border: var(--border-width) solid var(--line);
   background: var(--bg);
   padding: var(--space-3);
   display: grid;
   gap: var(--space-3);
   cursor: pointer;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: inherit;
   transition: background-color 0s, color 0s;
 }
 
-.home-dashboard .camp-card:hover,
-.home-dashboard .camp-card:focus-visible {
+.home-dashboard .camp-card .camp-card-open:hover,
+.home-dashboard .camp-card .camp-card-open:focus-visible {
   background: var(--text);
   color: var(--bg);
   outline: none;
 }
 
-.home-dashboard .camp-card:hover .camp-card-title p,
-.home-dashboard .camp-card:hover .camp-card-header time,
-.home-dashboard .camp-card:hover .camp-card-footer,
-.home-dashboard .camp-card:focus-visible .camp-card-title p,
-.home-dashboard .camp-card:focus-visible .camp-card-header time,
-.home-dashboard .camp-card:focus-visible .camp-card-footer {
+.home-dashboard .camp-card .camp-card-open:hover .camp-card-title p,
+.home-dashboard .camp-card .camp-card-open:hover .camp-card-header time,
+.home-dashboard .camp-card .camp-card-open:hover .camp-card-footer,
+.home-dashboard .camp-card .camp-card-open:focus-visible .camp-card-title p,
+.home-dashboard .camp-card .camp-card-open:focus-visible .camp-card-header time,
+.home-dashboard .camp-card .camp-card-open:focus-visible .camp-card-footer {
   color: var(--bg);
 }
 
-.home-dashboard .camp-card:hover .camp-card-prompt,
-.home-dashboard .camp-card:focus-visible .camp-card-prompt {
+.home-dashboard .camp-card .camp-card-open:hover .camp-card-prompt,
+.home-dashboard .camp-card .camp-card-open:focus-visible .camp-card-prompt {
   color: var(--bg);
 }
 
-.home-dashboard .camp-card:hover .camp-card-footer,
-.home-dashboard .camp-card:focus-visible .camp-card-footer {
+.home-dashboard .camp-card .camp-card-open:hover .camp-card-footer,
+.home-dashboard .camp-card .camp-card-open:focus-visible .camp-card-footer {
   border-top-color: var(--bg);
 }
 
@@ -169,6 +178,25 @@ h2 {
   font-weight: normal;
   line-height: 0.9;
   letter-spacing: -0.02em;
+}
+
+.home-dashboard .camp-card .camp-card-delete {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 1;
+  background: transparent;
+  color: var(--text-muted);
+  border: var(--border-width) solid transparent;
+  font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-2);
+}
+
+.home-dashboard .camp-card .camp-card-delete:hover:not(:disabled),
+.home-dashboard .camp-card .camp-card-delete:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(255, 69, 0, 0.1);
 }
 
 .home-dashboard .camp-card-title p {
@@ -286,9 +314,9 @@ h2 {
 
 @media (max-width: 920px) {
 
-  .home-dashboard-header,
   .home-create-camp {
     grid-template-columns: 1fr;
+    gap: var(--space-4);
     align-items: stretch;
   }
 
@@ -309,10 +337,15 @@ h2 {
   }
 }
 
+.home-create-camp>.primary-action {
+  grid-column: 1 / -1;
+  margin-top: var(--space-2);
+}
+
 .home-dashboard-header,
 .home-create-camp,
 .home-camp-list,
-.home-dashboard .camp-card,
+.home-dashboard .camp-card .camp-card-open,
 .home-dashboard button,
 .home-dashboard input,
 .home-dashboard select,
@@ -325,7 +358,7 @@ h2 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .home-dashboard .camp-card {
+  .home-dashboard .camp-card .camp-card-open {
     transition: none;
   }
 }
