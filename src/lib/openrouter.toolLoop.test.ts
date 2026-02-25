@@ -1,6 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('@tauri-apps/api/core', () => {
+  class MockChannel<T> {
+    onmessage: ((message: T) => void) | null = null;
+  }
+
+  return {
+    invoke: vi.fn(),
+    Channel: MockChannel,
+  };
+});
+
+import { invoke } from '@tauri-apps/api/core';
+
 import { runToolUseLoop, type OpenRouterToolSpec } from './openrouter';
+
+const invokeMock = vi.mocked(invoke);
 
 const TEST_TOOLS: OpenRouterToolSpec[] = [
   {
@@ -19,36 +34,48 @@ const TEST_TOOLS: OpenRouterToolSpec[] = [
   },
 ];
 
-function makeOkResponse(payload: unknown) {
+function makeCommandResult(payload: unknown, outputText: string) {
   return {
-    ok: true,
+    response_payload: payload,
+    output_text: outputText,
+    usage: {
+      prompt_tokens: 1,
+      completion_tokens: 1,
+      total_tokens: 2,
+    },
+    resolved_model: 'openrouter/auto',
     status: 200,
-    json: async () => payload,
-  } as Response;
+    duration_ms: 10,
+    response_headers: {},
+    stream_chunk_count: 0,
+  };
 }
 
 describe('runToolUseLoop', () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
+    invokeMock.mockReset();
   });
 
   it('returns assistant output without tools on first iteration', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      makeOkResponse({
-        model: 'openrouter/auto',
-        choices: [
-          {
-            message: {
-              content: 'hello world',
+    invokeMock.mockResolvedValue(
+      makeCommandResult(
+        {
+          model: 'openrouter/auto',
+          choices: [
+            {
+              message: {
+                content: 'hello world',
+              },
             },
+          ],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
           },
-        ],
-        usage: {
-          prompt_tokens: 1,
-          completion_tokens: 1,
-          total_tokens: 2,
         },
-      }),
+        'hello world',
+      ),
     );
 
     const onToken = vi.fn();
@@ -58,7 +85,6 @@ describe('runToolUseLoop', () => {
       'camp-1',
       [{ role: 'user', content: 'hi' }],
       TEST_TOOLS,
-      'api-key',
       onToken,
       {
         model: 'openrouter/auto',
@@ -68,7 +94,7 @@ describe('runToolUseLoop', () => {
       },
     );
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(executeToolCall).not.toHaveBeenCalled();
     expect(onToken).toHaveBeenCalledWith('hello world');
     expect(result.outputText).toBe('hello world');
@@ -76,51 +102,56 @@ describe('runToolUseLoop', () => {
   });
 
   it('executes tool call and then resolves final assistant output', async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
+    invokeMock
       .mockResolvedValueOnce(
-        makeOkResponse({
-          model: 'openrouter/auto',
-          choices: [
-            {
-              message: {
-                content: 'checking files',
-                tool_calls: [
-                  {
-                    id: 'tool-1',
-                    type: 'function',
-                    function: {
-                      name: 'read_file',
-                      arguments: '{"path":"project.md"}',
+        makeCommandResult(
+          {
+            model: 'openrouter/auto',
+            choices: [
+              {
+                message: {
+                  content: 'checking files',
+                  tool_calls: [
+                    {
+                      id: 'tool-1',
+                      type: 'function',
+                      function: {
+                        name: 'read_file',
+                        arguments: '{"path":"project.md"}',
+                      },
                     },
-                  },
-                ],
+                  ],
+                },
               },
+            ],
+            usage: {
+              prompt_tokens: 5,
+              completion_tokens: 4,
+              total_tokens: 9,
             },
-          ],
-          usage: {
-            prompt_tokens: 5,
-            completion_tokens: 4,
-            total_tokens: 9,
           },
-        }),
+          'checking files',
+        ),
       )
       .mockResolvedValueOnce(
-        makeOkResponse({
-          model: 'openrouter/auto',
-          choices: [
-            {
-              message: {
-                content: 'done',
+        makeCommandResult(
+          {
+            model: 'openrouter/auto',
+            choices: [
+              {
+                message: {
+                  content: 'done',
+                },
               },
+            ],
+            usage: {
+              prompt_tokens: 6,
+              completion_tokens: 5,
+              total_tokens: 11,
             },
-          ],
-          usage: {
-            prompt_tokens: 6,
-            completion_tokens: 5,
-            total_tokens: 11,
           },
-        }),
+          'done',
+        ),
       );
 
     const executeToolCall = vi.fn(async () => '{"path":"project.md","content":"ok"}');
@@ -129,7 +160,6 @@ describe('runToolUseLoop', () => {
       'camp-1',
       [{ role: 'user', content: 'read project.md' }],
       TEST_TOOLS,
-      'api-key',
       vi.fn(),
       {
         model: 'openrouter/auto',
@@ -139,7 +169,7 @@ describe('runToolUseLoop', () => {
       },
     );
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
     expect(executeToolCall).toHaveBeenCalledTimes(1);
     expect(result.outputText).toBe('done');
     expect(result.requestPayloads).toHaveLength(2);
@@ -147,32 +177,35 @@ describe('runToolUseLoop', () => {
   });
 
   it('throws when max iterations are exceeded', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      makeOkResponse({
-        model: 'openrouter/auto',
-        choices: [
-          {
-            message: {
-              content: 'still working',
-              tool_calls: [
-                {
-                  id: 'tool-1',
-                  type: 'function',
-                  function: {
-                    name: 'read_file',
-                    arguments: '{"path":"loop.md"}',
+    invokeMock.mockResolvedValue(
+      makeCommandResult(
+        {
+          model: 'openrouter/auto',
+          choices: [
+            {
+              message: {
+                content: 'still working',
+                tool_calls: [
+                  {
+                    id: 'tool-1',
+                    type: 'function',
+                    function: {
+                      name: 'read_file',
+                      arguments: '{"path":"loop.md"}',
+                    },
                   },
-                },
-              ],
+                ],
+              },
             },
+          ],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
           },
-        ],
-        usage: {
-          prompt_tokens: 1,
-          completion_tokens: 1,
-          total_tokens: 2,
         },
-      }),
+        'still working',
+      ),
     );
 
     const executeToolCall = vi.fn(async () => '{"ok":true}');
@@ -182,7 +215,6 @@ describe('runToolUseLoop', () => {
         'camp-1',
         [{ role: 'user', content: 'loop forever' }],
         TEST_TOOLS,
-        'api-key',
         vi.fn(),
         {
           model: 'openrouter/auto',
@@ -197,4 +229,3 @@ describe('runToolUseLoop', () => {
     expect(executeToolCall).toHaveBeenCalledTimes(2);
   });
 });
-

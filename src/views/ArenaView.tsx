@@ -1,7 +1,7 @@
 import { useEffect, useState, Fragment } from 'react';
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { useNavigate } from 'react-router-dom';
-import { dbListModels, getApiKey } from '../lib/db';
+import { dbListModels } from '../lib/db';
 import { streamOpenRouterChatCompletion, type OpenRouterChatRequestPayload } from '../lib/openrouter';
 import type { ModelRow } from '../lib/types';
 
@@ -125,12 +125,6 @@ export function ArenaView() {
             }
         }
 
-        const apiKey = await getApiKey();
-        if (!apiKey) {
-            alert('OpenRouter API key is missing. Configure it in Settings first.');
-            return;
-        }
-
         setSlots((prev) =>
             prev.map((s) => ({
                 ...s,
@@ -159,7 +153,6 @@ export function ArenaView() {
 
             try {
                 const result = await streamOpenRouterChatCompletion(
-                    apiKey,
                     requestPayload,
                     (token) => {
                         setSlots((prev) =>

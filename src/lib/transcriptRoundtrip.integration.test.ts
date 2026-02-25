@@ -160,7 +160,6 @@ describe('transcript replay roundtrip integration', () => {
       campId: 'camp-1',
       camp: runtimeCamp,
       selectedArtifacts: [],
-      apiKey: 'key',
       temperature: 0.3,
       maxTokens: 500,
       onToken: vi.fn(),
@@ -250,4 +249,3 @@ describe('transcript replay roundtrip integration', () => {
     expect(nextTurnPayload.tools).toHaveLength(1);
   });
 });
-

@@ -33,7 +33,19 @@
       }
     ],
     "security": {
-      "csp": null
+      "dangerousDisableAssetCspModification": false,
+      "csp": {
+        "default-src": "'self' customprotocol: asset:",
+        "script-src": "'self'",
+        "style-src": "'self' asset: http://asset.localhost",
+        "img-src": "'self' asset: http://asset.localhost data:",
+        "font-src": "'self' asset: http://asset.localhost data:",
+        "connect-src": "https://openrouter.ai",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self'",
+        "frame-ancestors": "'none'"
+      }
     }
   },
   "bundle": {

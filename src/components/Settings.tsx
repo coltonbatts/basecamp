@@ -1,7 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
 import {
-  getApiKey,
   getToolsEnabled,
   getWorkspacePath,
   hasApiKey,
@@ -104,12 +103,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
     setStatus(null);
 
     try {
-      const apiKeyFromStore = await getApiKey();
-      if (!apiKeyFromStore) {
-        throw new Error('OpenRouter API key is missing. Save it before syncing models.');
-      }
-
-      const result = await syncModelsToDb(apiKeyFromStore);
+      const result = await syncModelsToDb();
       await onModelsSynced();
       setStatus(`Synced ${result.count} models from OpenRouter.`);
     } catch (syncError) {
@@ -148,12 +142,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
     setKeyInfo(null);
 
     try {
-      const apiKeyFromStore = await getApiKey();
-      if (!apiKeyFromStore) {
-        throw new Error('OpenRouter API key is missing. Save it before checking usage.');
-      }
-
-      const info = await fetchOpenRouterKeyInfo(apiKeyFromStore);
+      const info = await fetchOpenRouterKeyInfo();
       setKeyInfo(info);
       setStatus('Key info retrieved successfully.');
     } catch (fetchError) {

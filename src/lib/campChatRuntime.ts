@@ -16,7 +16,6 @@ export type RunCampChatRuntimeInput = {
   campId: string;
   camp: Camp;
   selectedArtifacts: CampArtifact[];
-  apiKey: string;
   temperature: number;
   maxTokens: number;
   onToken: (token: string) => void;
@@ -156,7 +155,6 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
       input.campId,
       requestPayload.messages,
       tools,
-      input.apiKey,
       input.onToken,
       {
         model: requestPayload.model,
@@ -182,7 +180,7 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
     };
   }
 
-  const streamed = await streamOpenRouterChatCompletion(input.apiKey, requestPayload, input.onToken, {
+  const streamed = await streamOpenRouterChatCompletion(requestPayload, input.onToken, {
     correlationId: input.correlationId,
     telemetry: input.telemetry,
   });

@@ -9,7 +9,6 @@ import {
   campDelete,
   dbListModels,
   ensureDefaultWorkspace,
-  getApiKey,
   getDefaultModel,
 } from '../lib/db';
 import { syncModelsToDb } from '../lib/models';
@@ -226,12 +225,7 @@ export function HomeView() {
     resetFeedback();
 
     try {
-      const apiKey = await getApiKey();
-      if (!apiKey) {
-        throw new Error('OpenRouter API key is missing. Configure it in Settings first.');
-      }
-
-      const { count } = await syncModelsToDb(apiKey);
+      const { count } = await syncModelsToDb();
       await loadModels();
       setStatus(`Refreshed ${count} models from OpenRouter.`);
     } catch (refreshError) {

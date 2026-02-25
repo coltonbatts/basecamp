@@ -17,7 +17,6 @@ import type {
   CampUpdateMemoryPayload,
   CampUpdateSystemPromptPayload,
   ModelRow,
-  ModelRowPayload,
   Run,
   RunInsertPayload,
   RunSearchDbArgs,
@@ -33,12 +32,17 @@ export async function saveApiKey(apiKey: string): Promise<void> {
   await invoke('save_api_key', { apiKey });
 }
 
-export async function getApiKey(): Promise<string | null> {
-  return invoke<string | null>('get_api_key');
-}
-
 export async function hasApiKey(): Promise<boolean> {
   return invoke<boolean>('has_api_key');
+}
+
+export type OpenRouterModelsSyncResult = {
+  count: number;
+  updated_at: number;
+};
+
+export async function openrouterSyncModels(): Promise<OpenRouterModelsSyncResult> {
+  return invoke<OpenRouterModelsSyncResult>('openrouter_sync_models');
 }
 
 export async function insertRun(payload: RunInsertPayload): Promise<void> {
@@ -57,20 +61,12 @@ export async function updateRunRatingAndTags(payload: RunUpdatePayload): Promise
   await invoke('update_run_rating_and_tags', { payload });
 }
 
-export async function dbUpsertModels(models: ModelRowPayload[]): Promise<void> {
-  await invoke('db_upsert_models', { models });
-}
-
 export async function dbListModels(): Promise<ModelRow[]> {
   return invoke<ModelRow[]>('db_list_models');
 }
 
 export async function dbGetModelsLastSync(): Promise<number | null> {
   return invoke<number | null>('db_get_models_last_sync');
-}
-
-export async function dbSetModelsLastSync(tsMs: number): Promise<void> {
-  await invoke('db_set_models_last_sync', { tsMs });
 }
 
 export async function setWorkspacePath(path: string): Promise<void> {

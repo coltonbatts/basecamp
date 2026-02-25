@@ -25,7 +25,6 @@ import {
   campWriteContextFile,
   dbListModels,
   ensureDefaultWorkspace,
-  getApiKey,
   pickWorkspaceFolder,
   setWorkspacePath,
 } from '../lib/db';
@@ -989,10 +988,7 @@ export function MainLayout() {
     setStatus(null);
 
     try {
-      const apiKey = await getApiKey();
-      if (!apiKey) throw new Error('OpenRouter API key is missing. Save it in Settings first.');
-
-      const { count } = await syncModelsToDb(apiKey);
+      const { count } = await syncModelsToDb();
       await loadModels();
       setStatus(`Synced ${count} models.`);
     } catch (syncError) {
@@ -1108,9 +1104,6 @@ export function MainLayout() {
     let composedBreakdown: unknown = null;
 
     try {
-      const apiKey = await getApiKey();
-      if (!apiKey) throw new Error('OpenRouter API key is missing. Save it in Settings first.');
-
       await persistCampDraftsForSend();
       const selectedArtifactsForRequest: CampArtifact[] = await Promise.all(
         selectedArtifactIds.map((artifactId) => campGetArtifact(selectedCampId, artifactId)),
@@ -1137,7 +1130,6 @@ export function MainLayout() {
           campId: selectedCampId,
           camp: campForRuntime,
           selectedArtifacts: selectedArtifactsForRequest,
-          apiKey,
           temperature,
           maxTokens,
           onToken: (token) => {

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
@@ -6,11 +7,12 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use keyring::{Entry, Error as KeyringError};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{App, Manager, State};
+use tauri::{ipc::Channel, App, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
@@ -362,6 +364,58 @@ struct InspectCampFileMeta {
     size_bytes: Option<u64>,
     modified_at_ms: Option<i64>,
     absolute_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenRouterUsage {
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OpenRouterStreamRequest {
+    model: String,
+    messages: Vec<Value>,
+    temperature: f64,
+    max_tokens: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenRouterStreamEvent {
+    Token { token: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenRouterCompletionResult {
+    response_payload: Value,
+    output_text: String,
+    usage: OpenRouterUsage,
+    resolved_model: Option<String>,
+    status: u16,
+    duration_ms: i64,
+    response_headers: BTreeMap<String, String>,
+    stream_chunk_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenRouterCommandError {
+    message: String,
+    status: Option<u16>,
+    response_payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenRouterModelsSyncResult {
+    count: usize,
+    updated_at: i64,
 }
 
 fn map_model_row(row: &Row<'_>) -> rusqlite::Result<ModelRow> {
@@ -1901,6 +1955,177 @@ fn keyring_entry() -> Result<Entry, String> {
         .map_err(|err| format!("Keyring entry error: {err}"))
 }
 
+fn read_api_key_from_keyring() -> Result<Option<String>, String> {
+    let entry = keyring_entry()?;
+    match entry.get_password() {
+        Ok(key) => {
+            let trimmed = key.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) => Err(format!("Unable to read API key: {err}")),
+    }
+}
+
+fn require_api_key_from_keyring() -> Result<String, OpenRouterCommandError> {
+    read_api_key_from_keyring()
+        .map_err(|err| OpenRouterCommandError {
+            message: err,
+            status: None,
+            response_payload: Value::Null,
+        })?
+        .ok_or_else(|| OpenRouterCommandError {
+            message: "OpenRouter API key is missing. Save it in Settings first.".to_string(),
+            status: None,
+            response_payload: Value::Null,
+        })
+}
+
+fn sanitize_openrouter_response_headers(headers: &reqwest::header::HeaderMap) -> BTreeMap<String, String> {
+    let mut safe = BTreeMap::new();
+    for (name, value) in headers {
+        let key = name.as_str().to_ascii_lowercase();
+        if key == "set-cookie"
+            || key == "cookie"
+            || key == "authorization"
+            || key == "proxy-authorization"
+        {
+            continue;
+        }
+
+        if let Ok(text) = value.to_str() {
+            safe.insert(name.as_str().to_string(), text.to_string());
+        }
+    }
+
+    safe
+}
+
+fn normalize_openrouter_message_content(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => text.clone(),
+                Value::Object(object) => object
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => String::new(),
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn parse_openrouter_usage(payload: &Value) -> OpenRouterUsage {
+    let usage = payload.get("usage").and_then(Value::as_object);
+    OpenRouterUsage {
+        prompt_tokens: usage
+            .and_then(|entry| entry.get("prompt_tokens"))
+            .and_then(Value::as_i64),
+        completion_tokens: usage
+            .and_then(|entry| entry.get("completion_tokens"))
+            .and_then(Value::as_i64),
+        total_tokens: usage
+            .and_then(|entry| entry.get("total_tokens"))
+            .and_then(Value::as_i64),
+    }
+}
+
+fn parse_openrouter_resolved_model(payload: &Value) -> Option<String> {
+    payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_openrouter_error_message(status: u16, payload: &Value) -> String {
+    payload
+        .get("error")
+        .and_then(Value::as_object)
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("OpenRouter request failed with status {status}"))
+}
+
+fn openrouter_headers(api_key: &str) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    headers.insert("HTTP-Referer".to_string(), "http://localhost".to_string());
+    headers.insert("X-Title".to_string(), "Basecamp".to_string());
+    headers
+}
+
+fn to_reqwest_headers(headers: &BTreeMap<String, String>) -> reqwest::header::HeaderMap {
+    let mut mapped = reqwest::header::HeaderMap::new();
+    for (key, value) in headers {
+        let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) else {
+            continue;
+        };
+        let Ok(header_value) = reqwest::header::HeaderValue::from_str(value) else {
+            continue;
+        };
+        mapped.insert(name, header_value);
+    }
+
+    mapped
+}
+
+fn parse_context_length(value: Option<&Value>) -> Option<i64> {
+    let raw = value?;
+    if let Some(number) = raw.as_i64() {
+        return Some(number.max(0));
+    }
+
+    if let Some(number) = raw.as_u64() {
+        return i64::try_from(number).ok();
+    }
+
+    if let Some(text) = raw.as_str() {
+        return text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|parsed| parsed.max(0));
+    }
+
+    None
+}
+
+fn trim_optional_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+}
+
+fn ensure_main_window(window: &Window) -> Result<(), String> {
+    if window.label() == "main" {
+        return Ok(());
+    }
+
+    Err("This command is only available from the main window.".to_string())
+}
+
 #[tauri::command]
 fn save_api_key(api_key: String) -> Result<(), String> {
     let trimmed = api_key.trim();
@@ -1915,19 +2140,388 @@ fn save_api_key(api_key: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_api_key() -> Result<Option<String>, String> {
-    let entry = keyring_entry()?;
-
-    match entry.get_password() {
-        Ok(key) => Ok(Some(key)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(err) => Err(format!("Unable to read API key: {err}")),
-    }
+fn has_api_key() -> Result<bool, String> {
+    Ok(read_api_key_from_keyring()?.is_some())
 }
 
 #[tauri::command]
-fn has_api_key() -> Result<bool, String> {
-    Ok(get_api_key()?.is_some())
+async fn stream_openrouter_completion(
+    request_payload: OpenRouterStreamRequest,
+    on_event: Channel<OpenRouterStreamEvent>,
+) -> Result<OpenRouterCompletionResult, OpenRouterCommandError> {
+    let api_key = require_api_key_from_keyring()?;
+    let client = reqwest::Client::new();
+    let headers = openrouter_headers(&api_key);
+    let is_stream = request_payload.stream.unwrap_or(false);
+    let started_at = now_timestamp_ms();
+
+    let response = client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .headers(to_reqwest_headers(&headers))
+        .json(&request_payload)
+        .send()
+        .await
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("OpenRouter network request failed: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+
+    let status = response.status().as_u16();
+    let response_headers = sanitize_openrouter_response_headers(response.headers());
+
+    if !response.status().is_success() {
+        let payload = response.json::<Value>().await.unwrap_or(Value::Null);
+        return Err(OpenRouterCommandError {
+            message: parse_openrouter_error_message(status, &payload),
+            status: Some(status),
+            response_payload: payload,
+        });
+    }
+
+    if !is_stream {
+        let payload = response
+            .json::<Value>()
+            .await
+            .map_err(|err| OpenRouterCommandError {
+                message: format!("Unable to parse OpenRouter response JSON: {err}"),
+                status: Some(status),
+                response_payload: Value::Null,
+            })?;
+
+        let output_text = payload
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .map(normalize_openrouter_message_content)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        return Ok(OpenRouterCompletionResult {
+            response_payload: payload.clone(),
+            output_text,
+            usage: parse_openrouter_usage(&payload),
+            resolved_model: parse_openrouter_resolved_model(&payload),
+            status,
+            duration_ms: (now_timestamp_ms() - started_at).max(0),
+            response_headers,
+            stream_chunk_count: 0,
+        });
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut output_text = String::new();
+    let mut resolved_model: Option<String> = None;
+    let mut usage = OpenRouterUsage {
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+    };
+    let mut stream_chunk_count = 0usize;
+    let mut buffer = String::new();
+
+    while let Some(next_chunk) = stream.next().await {
+        let bytes = next_chunk.map_err(|err| OpenRouterCommandError {
+            message: format!("Unable to read OpenRouter stream: {err}"),
+            status: Some(status),
+            response_payload: Value::Null,
+        })?;
+
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(split_index) = buffer.find("\n\n") {
+            let raw_event = buffer[..split_index].to_string();
+            buffer = buffer[split_index + 2..].to_string();
+
+            for line in raw_event.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with("data:") {
+                    continue;
+                }
+
+                let data = trimmed.trim_start_matches("data:").trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+
+                let parsed = serde_json::from_str::<Value>(data);
+                if let Ok(chunk_value) = parsed {
+                    stream_chunk_count += 1;
+
+                    if let Some(model) = parse_openrouter_resolved_model(&chunk_value) {
+                        resolved_model = Some(model);
+                    }
+
+                    let next_usage = parse_openrouter_usage(&chunk_value);
+                    usage.prompt_tokens = next_usage.prompt_tokens.or(usage.prompt_tokens);
+                    usage.completion_tokens = next_usage.completion_tokens.or(usage.completion_tokens);
+                    usage.total_tokens = next_usage.total_tokens.or(usage.total_tokens);
+
+                    let token = chunk_value
+                        .get("choices")
+                        .and_then(Value::as_array)
+                        .and_then(|choices| choices.first())
+                        .and_then(|choice| choice.get("delta"))
+                        .and_then(|delta| delta.get("content"))
+                        .map(normalize_openrouter_message_content)
+                        .unwrap_or_default();
+
+                    if !token.is_empty() {
+                        output_text.push_str(&token);
+                        let _ = on_event.send(OpenRouterStreamEvent::Token { token });
+                    }
+                }
+            }
+        }
+    }
+
+    if !buffer.trim().is_empty() {
+        for line in buffer.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("data:") {
+                continue;
+            }
+            let data = trimmed.trim_start_matches("data:").trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+
+            if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
+                stream_chunk_count += 1;
+                if let Some(model) = parse_openrouter_resolved_model(&chunk_value) {
+                    resolved_model = Some(model);
+                }
+
+                let next_usage = parse_openrouter_usage(&chunk_value);
+                usage.prompt_tokens = next_usage.prompt_tokens.or(usage.prompt_tokens);
+                usage.completion_tokens = next_usage.completion_tokens.or(usage.completion_tokens);
+                usage.total_tokens = next_usage.total_tokens.or(usage.total_tokens);
+
+                let token = chunk_value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .and_then(|choices| choices.first())
+                    .and_then(|choice| choice.get("delta"))
+                    .and_then(|delta| delta.get("content"))
+                    .map(normalize_openrouter_message_content)
+                    .unwrap_or_default();
+
+                if !token.is_empty() {
+                    output_text.push_str(&token);
+                    let _ = on_event.send(OpenRouterStreamEvent::Token { token });
+                }
+            }
+        }
+    }
+
+    let response_payload = serde_json::json!({
+        "chunks_processed": stream_chunk_count,
+        "output_text": output_text,
+        "usage": usage,
+        "resolved_model": resolved_model,
+    });
+
+    Ok(OpenRouterCompletionResult {
+        response_payload,
+        output_text,
+        usage,
+        resolved_model,
+        status,
+        duration_ms: (now_timestamp_ms() - started_at).max(0),
+        response_headers,
+        stream_chunk_count,
+    })
+}
+
+#[tauri::command]
+async fn openrouter_fetch_key_info() -> Result<Value, OpenRouterCommandError> {
+    let api_key = require_api_key_from_keyring()?;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get("https://openrouter.ai/api/v1/auth/key")
+        .headers(to_reqwest_headers(&openrouter_headers(&api_key)))
+        .send()
+        .await
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("OpenRouter key info request failed: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+
+    let status = response.status().as_u16();
+    let is_success = response.status().is_success();
+    let payload = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !is_success {
+        return Err(OpenRouterCommandError {
+            message: parse_openrouter_error_message(status, &payload),
+            status: Some(status),
+            response_payload: payload,
+        });
+    }
+
+    payload
+        .get("data")
+        .cloned()
+        .ok_or_else(|| OpenRouterCommandError {
+            message: "OpenRouter key info response missing `data` object.".to_string(),
+            status: Some(status),
+            response_payload: payload,
+        })
+}
+
+#[tauri::command]
+async fn openrouter_sync_models(
+    state: State<'_, AppState>,
+) -> Result<OpenRouterModelsSyncResult, OpenRouterCommandError> {
+    let api_key = require_api_key_from_keyring()?;
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://openrouter.ai/api/v1/models")
+        .headers(to_reqwest_headers(&openrouter_headers(&api_key)))
+        .send()
+        .await
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("OpenRouter model sync request failed: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+
+    let status = response.status().as_u16();
+    let is_success = response.status().is_success();
+    let payload = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !is_success {
+        return Err(OpenRouterCommandError {
+            message: parse_openrouter_error_message(status, &payload),
+            status: Some(status),
+            response_payload: payload,
+        });
+    }
+
+    let raw_models = if payload.is_array() {
+        payload.as_array().cloned().unwrap_or_default()
+    } else {
+        payload
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| OpenRouterCommandError {
+                message: "OpenRouter model response is missing a model array.".to_string(),
+                status: Some(status),
+                response_payload: payload.clone(),
+            })?
+    };
+
+    let updated_at = now_timestamp_ms();
+    let mut model_rows = Vec::new();
+
+    for raw_model in raw_models {
+        let model_object = match raw_model.as_object() {
+            Some(value) => value,
+            None => continue,
+        };
+        let Some(model_id) = trim_optional_string(model_object.get("id")) else {
+            continue;
+        };
+
+        let pricing_json = model_object
+            .get("pricing")
+            .and_then(|pricing| serde_json::to_string(pricing).ok());
+        let raw_json = serde_json::to_string(&raw_model).unwrap_or_else(|_| "null".to_string());
+
+        model_rows.push(ModelRowPayload {
+            id: model_id,
+            name: trim_optional_string(model_object.get("name")),
+            description: trim_optional_string(model_object.get("description")),
+            context_length: parse_context_length(model_object.get("context_length")),
+            pricing_json,
+            raw_json,
+            updated_at,
+        });
+    }
+
+    let mut connection = state.connection.lock().map_err(|_| OpenRouterCommandError {
+        message: "Database lock error".to_string(),
+        status: None,
+        response_payload: Value::Null,
+    })?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("Unable to start model sync transaction: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+
+    {
+        let mut statement = transaction
+            .prepare(
+                "
+            INSERT OR REPLACE INTO models (
+              id,
+              name,
+              description,
+              context_length,
+              pricing_json,
+              raw_json,
+              updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            )
+            .map_err(|err| OpenRouterCommandError {
+                message: format!("Unable to prepare model sync statement: {err}"),
+                status: None,
+                response_payload: Value::Null,
+            })?;
+
+        for model in &model_rows {
+            statement
+                .execute(params![
+                    model.id,
+                    model.name,
+                    model.description,
+                    model.context_length,
+                    model.pricing_json,
+                    model.raw_json,
+                    model.updated_at,
+                ])
+                .map_err(|err| OpenRouterCommandError {
+                    message: format!("Unable to upsert model row: {err}"),
+                    status: None,
+                    response_payload: Value::Null,
+                })?;
+        }
+    }
+
+    transaction.commit().map_err(|err| OpenRouterCommandError {
+        message: format!("Unable to commit model sync transaction: {err}"),
+        status: None,
+        response_payload: Value::Null,
+    })?;
+
+    connection
+        .execute(
+            "
+          INSERT INTO meta (key, value)
+          VALUES ('models_last_sync', ?1)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          ",
+            params![updated_at],
+        )
+        .map_err(|err| OpenRouterCommandError {
+            message: format!("Unable to update model sync timestamp: {err}"),
+            status: None,
+            response_payload: Value::Null,
+        })?;
+
+    Ok(OpenRouterModelsSyncResult {
+        count: model_rows.len(),
+        updated_at,
+    })
 }
 
 #[tauri::command]
@@ -2097,60 +2691,6 @@ fn update_run_rating_and_tags(
 }
 
 #[tauri::command]
-fn db_upsert_models(
-    state: State<'_, AppState>,
-    models: Vec<ModelRowPayload>,
-) -> Result<(), String> {
-    let mut connection = state
-        .connection
-        .lock()
-        .map_err(|_| "Database lock error".to_string())?;
-
-    let transaction = connection
-        .transaction()
-        .map_err(|err| format!("Unable to start model transaction: {err}"))?;
-
-    {
-        let mut statement = transaction
-            .prepare(
-                "
-        INSERT OR REPLACE INTO models (
-          id,
-          name,
-          description,
-          context_length,
-          pricing_json,
-          raw_json,
-          updated_at
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ",
-            )
-            .map_err(|err| format!("Unable to prepare model upsert statement: {err}"))?;
-
-        for model in models {
-            statement
-                .execute(params![
-                    model.id,
-                    model.name,
-                    model.description,
-                    model.context_length,
-                    model.pricing_json,
-                    model.raw_json,
-                    model.updated_at,
-                ])
-                .map_err(|err| format!("Unable to upsert model row: {err}"))?;
-        }
-    }
-
-    transaction
-        .commit()
-        .map_err(|err| format!("Unable to commit model transaction: {err}"))?;
-
-    Ok(())
-}
-
-#[tauri::command]
 fn db_list_models(state: State<'_, AppState>) -> Result<Vec<ModelRow>, String> {
     let connection = state
         .connection
@@ -2196,27 +2736,6 @@ fn db_get_models_last_sync(state: State<'_, AppState>) -> Result<Option<i64>, St
         )
         .optional()
         .map_err(|err| format!("Unable to get models last sync: {err}"))
-}
-
-#[tauri::command]
-fn db_set_models_last_sync(state: State<'_, AppState>, ts_ms: i64) -> Result<(), String> {
-    let connection = state
-        .connection
-        .lock()
-        .map_err(|_| "Database lock error".to_string())?;
-
-    connection
-        .execute(
-            "
-      INSERT INTO meta (key, value)
-      VALUES ('models_last_sync', ?1)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      ",
-            params![ts_ms],
-        )
-        .map_err(|err| format!("Unable to set models last sync: {err}"))?;
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -2378,10 +2897,12 @@ fn resolve_camp_dir_for_inspect(connection: &Connection, camp_id: &str) -> Resul
 
 #[tauri::command]
 fn inspect_emit_event(
+    window: Window,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     payload: InspectEmitEventPayload,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2407,9 +2928,11 @@ fn inspect_emit_event(
 
 #[tauri::command]
 fn inspect_write_turn_request(
+    window: Window,
     state: State<'_, AppState>,
     payload: InspectWriteTurnPayload,
 ) -> Result<String, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2427,9 +2950,11 @@ fn inspect_write_turn_request(
 
 #[tauri::command]
 fn inspect_write_turn_response(
+    window: Window,
     state: State<'_, AppState>,
     payload: InspectWriteTurnPayload,
 ) -> Result<String, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2447,9 +2972,11 @@ fn inspect_write_turn_response(
 
 #[tauri::command]
 fn inspect_write_turn_bundle(
+    window: Window,
     state: State<'_, AppState>,
     payload: InspectWriteTurnPayload,
 ) -> Result<String, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2467,10 +2994,12 @@ fn inspect_write_turn_bundle(
 
 #[tauri::command]
 fn inspect_read_turn_bundle(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     correlation_id: String,
 ) -> Result<Value, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2491,9 +3020,11 @@ fn inspect_read_turn_bundle(
 
 #[tauri::command]
 fn inspect_stat_camp_file(
+    window: Window,
     state: State<'_, AppState>,
     payload: InspectCampFileMetaPayload,
 ) -> Result<InspectCampFileMeta, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2717,10 +3248,12 @@ fn workspace_list_context_files(state: State<'_, AppState>) -> Result<Vec<String
 
 #[tauri::command]
 fn camp_attach_workspace_context_file(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     path: String,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2752,10 +3285,12 @@ fn camp_attach_workspace_context_file(
 
 #[tauri::command]
 fn camp_detach_workspace_context_file(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     path: String,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2792,10 +3327,12 @@ fn camp_detach_workspace_context_file(
 
 #[tauri::command]
 fn tauri_cmd_read_context_file(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     path: String,
 ) -> Result<String, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2814,10 +3351,12 @@ fn tauri_cmd_read_context_file(
 
 #[tauri::command]
 fn tauri_cmd_list_context_files(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     path: Option<String>,
 ) -> Result<Vec<String>, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2853,11 +3392,13 @@ fn tauri_cmd_list_context_files(
 
 #[tauri::command]
 fn tauri_cmd_write_context_file(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     path: String,
     content: String,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2882,7 +3423,8 @@ fn tauri_cmd_write_context_file(
 }
 
 #[tauri::command]
-fn camp_delete(state: State<'_, AppState>, camp_id: String) -> Result<(), String> {
+fn camp_delete(window: Window, state: State<'_, AppState>, camp_id: String) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2901,7 +3443,8 @@ fn camp_delete(state: State<'_, AppState>, camp_id: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn camp_list(state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
+fn camp_list(window: Window, state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2947,7 +3490,12 @@ fn camp_list(state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
 }
 
 #[tauri::command]
-fn camp_create(state: State<'_, AppState>, payload: CampCreatePayload) -> Result<Camp, String> {
+fn camp_create(
+    window: Window,
+    state: State<'_, AppState>,
+    payload: CampCreatePayload,
+) -> Result<Camp, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -2993,7 +3541,8 @@ fn camp_create(state: State<'_, AppState>, payload: CampCreatePayload) -> Result
 }
 
 #[tauri::command]
-fn camp_load(state: State<'_, AppState>, camp_id: String) -> Result<Camp, String> {
+fn camp_load(window: Window, state: State<'_, AppState>, camp_id: String) -> Result<Camp, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3006,9 +3555,11 @@ fn camp_load(state: State<'_, AppState>, camp_id: String) -> Result<Camp, String
 
 #[tauri::command]
 fn camp_update_config(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampUpdateConfigPayload,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3027,9 +3578,11 @@ fn camp_update_config(
 
 #[tauri::command]
 fn camp_update_system_prompt(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampUpdateSystemPromptPayload,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3044,9 +3597,11 @@ fn camp_update_system_prompt(
 
 #[tauri::command]
 fn camp_update_memory(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampUpdateMemoryPayload,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3060,9 +3615,11 @@ fn camp_update_memory(
 
 #[tauri::command]
 fn camp_append_message(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampAppendMessagePayload,
 ) -> Result<CampMessage, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3100,9 +3657,11 @@ fn camp_append_message(
 
 #[tauri::command]
 fn camp_list_artifacts(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
 ) -> Result<Vec<CampArtifactMetadata>, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3116,10 +3675,12 @@ fn camp_list_artifacts(
 
 #[tauri::command]
 fn camp_get_artifact(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     artifact_id: String,
 ) -> Result<CampArtifact, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3132,9 +3693,11 @@ fn camp_get_artifact(
 
 #[tauri::command]
 fn camp_create_artifact_from_message(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampCreateArtifactFromMessagePayload,
 ) -> Result<CampArtifact, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3191,9 +3754,11 @@ fn camp_create_artifact_from_message(
 
 #[tauri::command]
 fn camp_update_artifact(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampUpdateArtifactPayload,
 ) -> Result<CampArtifact, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3244,9 +3809,11 @@ fn camp_update_artifact(
 
 #[tauri::command]
 fn camp_toggle_artifact_archive(
+    window: Window,
     state: State<'_, AppState>,
     payload: CampToggleArtifactArchivePayload,
 ) -> Result<CampArtifactMetadata, String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3271,10 +3838,12 @@ fn camp_toggle_artifact_archive(
 
 #[tauri::command]
 fn camp_increment_artifact_usage(
+    window: Window,
     state: State<'_, AppState>,
     camp_id: String,
     artifact_ids: Vec<String>,
 ) -> Result<(), String> {
+    ensure_main_window(&window)?;
     let connection = state
         .connection
         .lock()
@@ -3333,16 +3902,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             save_api_key,
-            get_api_key,
             has_api_key,
+            stream_openrouter_completion,
+            openrouter_fetch_key_info,
+            openrouter_sync_models,
             insert_run,
             list_runs,
             get_run_by_id,
             update_run_rating_and_tags,
-            db_upsert_models,
             db_list_models,
             db_get_models_last_sync,
-            db_set_models_last_sync,
             ensure_default_workspace,
             set_workspace_path,
             get_workspace_path,

@@ -12,7 +12,6 @@ export const TOOL_STEP_LIMIT_MESSAGE =
   'Tool step limit reached (5). No further tool calls were executed. Please narrow the task and run again.';
 
 export type ToolRuntimeInput = {
-  apiKey: string;
   runId: string;
   model: string;
   systemPrompt: string;
@@ -157,7 +156,7 @@ export async function runToolRuntime(input: ToolRuntimeInput): Promise<ToolRunti
 
     let completion;
     try {
-      completion = await runOpenRouterChatCompletion(input.apiKey, requestPayload);
+      completion = await runOpenRouterChatCompletion(requestPayload);
     } catch (error) {
       if (error instanceof OpenRouterRequestError) {
         responsePayloads.push(error.responsePayload);
