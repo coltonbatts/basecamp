@@ -1,3 +1,5 @@
+import { invoke } from '@tauri-apps/api/core';
+
 import type { OpenRouterToolCall, OpenRouterToolSpec } from './openrouter';
 import type { CampArtifact, CampArtifactMetadata, CampTranscriptSearchMatch } from './types';
 import {
@@ -13,7 +15,10 @@ import {
   campUpdatePromptArgsSchema,
   campWriteFileArgsSchema,
   getCampToolKind,
+  getMcpToolKind,
+  getMcpToolSpecs,
   isCampToolName,
+  isMcpToolName,
   parseToolArguments,
   type ToolKind,
 } from './tools/registry';
@@ -42,6 +47,11 @@ export const FILESYSTEM_TOOLS: OpenRouterToolSpec[] = campToolSpecs.filter((tool
   tool.function.name === 'write_file'
 );
 
+/** Camp tools + any dynamically discovered MCP tools. */
+export function getAllToolSpecs(): OpenRouterToolSpec[] {
+  return [...campToolSpecs, ...getMcpToolSpecs()];
+}
+
 function toJsonString(value: unknown): string {
   return JSON.stringify(value);
 }
@@ -61,7 +71,47 @@ function normalizeArtifactRows(rows: CampArtifactMetadata[]): CampArtifactMetada
 }
 
 export function getToolKind(name: string): ToolKind | null {
-  return getCampToolKind(name);
+  return getCampToolKind(name) ?? getMcpToolKind(name);
+}
+
+export { isMcpToolName } from './tools/registry';
+
+type McpToolResultPayload = {
+  content: Array<{ type: string; text?: string }>;
+  is_error: boolean;
+};
+
+export async function executeMcpToolCall(
+  toolCall: OpenRouterToolCall,
+): Promise<string> {
+  const name = toolCall.function.name;
+  const slashIndex = name.indexOf('/');
+  if (slashIndex === -1) {
+    throw new Error(`Invalid MCP tool name (expected serverId/toolName): ${name}`);
+  }
+  const serverId = name.slice(0, slashIndex);
+  const toolName = name.slice(slashIndex + 1);
+  const args = parseToolArguments(toolCall.function.arguments ?? '{}');
+
+  const result = await invoke<McpToolResultPayload>('mcp_call_tool', {
+    serverId,
+    toolName,
+    arguments: args,
+  });
+
+  if (result.is_error) {
+    const errorText = result.content
+      .map((c) => c.text ?? '')
+      .join('\n')
+      .trim();
+    return JSON.stringify({ error: errorText || 'MCP tool returned an error' });
+  }
+
+  const text = result.content
+    .map((c) => c.text ?? '')
+    .join('\n')
+    .trim();
+  return text || JSON.stringify(result);
 }
 
 export async function executeCampToolCall(

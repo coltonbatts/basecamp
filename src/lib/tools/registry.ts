@@ -540,6 +540,82 @@ export function getCampToolKind(value: string): ToolKind | null {
   return isCampToolName(value) ? campToolKinds[value] : null;
 }
 
+// ---------------------------------------------------------------------------
+// MCP runtime registry — populated at startup via mcp_discover_tools
+// ---------------------------------------------------------------------------
+
+export type McpToolEntry = {
+  serverId: string;
+  name: string;
+  qualifiedName: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  kind: ToolKind;
+  spec: OpenRouterToolSpec;
+};
+
+let mcpToolRegistry: McpToolEntry[] = [];
+
+export function setMcpTools(tools: McpToolEntry[]): void {
+  mcpToolRegistry = tools;
+}
+
+export function getMcpTools(): McpToolEntry[] {
+  return mcpToolRegistry;
+}
+
+export function getMcpToolSpecs(): OpenRouterToolSpec[] {
+  return mcpToolRegistry.map((entry) => entry.spec);
+}
+
+export function getMcpToolKind(qualifiedName: string): ToolKind | null {
+  const entry = mcpToolRegistry.find((t) => t.qualifiedName === qualifiedName);
+  return entry?.kind ?? null;
+}
+
+export function isMcpToolName(name: string): boolean {
+  return mcpToolRegistry.some((t) => t.qualifiedName === name);
+}
+
+export function buildMcpToolSpec(entry: {
+  qualifiedName: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}): OpenRouterToolSpec {
+  return {
+    type: 'function',
+    function: {
+      name: entry.qualifiedName,
+      description: entry.description,
+      parameters: entry.inputSchema as OpenRouterToolSpec['function']['parameters'],
+    },
+  };
+}
+
+export function buildMcpToolEntry(raw: {
+  server_id: string;
+  name: string;
+  qualified_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  read_only: boolean;
+}): McpToolEntry {
+  const kind: ToolKind = raw.read_only ? 'read' : 'mutate';
+  return {
+    serverId: raw.server_id,
+    name: raw.name,
+    qualifiedName: raw.qualified_name,
+    description: raw.description,
+    inputSchema: raw.input_schema,
+    kind,
+    spec: buildMcpToolSpec({
+      qualifiedName: raw.qualified_name,
+      description: raw.description,
+      inputSchema: raw.input_schema,
+    }),
+  };
+}
+
 export function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
   if (typeof rawArguments === 'string') {
     try {

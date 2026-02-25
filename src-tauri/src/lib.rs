@@ -17,6 +17,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 mod inspect;
+pub mod mcp;
 
 const KEYRING_SERVICE: &str = "com.basecamp.app";
 const KEYRING_ACCOUNT: &str = "openrouter_api_key";
@@ -40,8 +41,9 @@ const CAMP_ARTIFACTS_SCHEMA_VERSION: &str = "0.1";
 const DEFAULT_CAMP_NAME: &str = "Untitled Camp";
 const DEFAULT_CAMP_MODEL: &str = "openrouter/auto";
 
-struct AppState {
-    connection: Mutex<Connection>,
+pub struct AppState {
+    pub connection: Mutex<Connection>,
+    pub mcp: tokio::sync::Mutex<mcp::McpConnections>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -592,6 +594,8 @@ fn create_tables(connection: &Connection) -> Result<(), rusqlite::Error> {
     CREATE INDEX IF NOT EXISTS idx_tool_calls_started_at ON tool_calls(started_at);
     ",
     )?;
+
+    mcp::create_mcp_servers_table(connection)?;
 
     Ok(())
 }
@@ -3883,6 +3887,7 @@ pub fn run() {
             let connection = init_database(app)?;
             app.manage(AppState {
                 connection: Mutex::new(connection),
+                mcp: tokio::sync::Mutex::new(mcp::McpConnections::new()),
             });
 
             // Handle the splash screen
@@ -3953,7 +3958,11 @@ pub fn run() {
             camp_create_artifact_from_message,
             camp_update_artifact,
             camp_toggle_artifact_archive,
-            camp_increment_artifact_usage
+            camp_increment_artifact_usage,
+            mcp::mcp_register_server,
+            mcp::mcp_list_servers,
+            mcp::mcp_discover_tools,
+            mcp::mcp_call_tool
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

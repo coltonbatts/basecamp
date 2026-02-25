@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -43,7 +44,8 @@ import {
 } from '../lib/inspect';
 import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
-import { CAMP_TOOLS, executeCampToolCall, getToolKind } from '../lib/tools';
+import { CAMP_TOOLS, executeCampToolCall, executeMcpToolCall, getAllToolSpecs, getToolKind, isMcpToolName } from '../lib/tools';
+import { buildMcpToolEntry, setMcpTools } from '../lib/tools/registry';
 import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
@@ -332,6 +334,44 @@ export function MainLayout() {
 
     void boot();
   }, [loadCamps, loadModels]);
+
+  // Discover MCP tools from registered servers on startup
+  useEffect(() => {
+    const discoverMcpTools = async () => {
+      try {
+        type McpServerStatusPayload = { id: string; enabled: boolean; connected: boolean };
+        type McpToolDefPayload = {
+          server_id: string;
+          name: string;
+          qualified_name: string;
+          description: string;
+          input_schema: Record<string, unknown>;
+          read_only: boolean;
+        };
+
+        const servers = await invoke<McpServerStatusPayload[]>('mcp_list_servers');
+        const enabledServers = servers.filter((s) => s.enabled);
+        const allTools: McpToolDefPayload[] = [];
+
+        for (const server of enabledServers) {
+          try {
+            const tools = await invoke<McpToolDefPayload[]>('mcp_discover_tools', {
+              serverId: server.id,
+            });
+            allTools.push(...tools);
+          } catch {
+            // If a single server fails, continue with others
+          }
+        }
+
+        setMcpTools(allTools.map(buildMcpToolEntry));
+      } catch {
+        // MCP discovery is best-effort; don't block app startup
+      }
+    };
+
+    void discoverMcpTools();
+  }, []);
 
   useEffect(() => {
     void getDeveloperInspectMode()
@@ -717,7 +757,9 @@ export function MainLayout() {
       }
 
       try {
-        const toolResult = await executeCampToolCall(toolCall, {
+        const toolResult = isMcpToolName(toolCall.function.name)
+          ? await executeMcpToolCall(toolCall)
+          : await executeCampToolCall(toolCall, {
           readFile: async (path) => campReadContextFile(campId, path),
           listFiles: async (path) => campListContextFiles(campId, path),
           writeFile: async (path, content) => {
@@ -1135,7 +1177,7 @@ export function MainLayout() {
           onToken: (token) => {
             setStreamingText((previous) => previous + token);
           },
-          tools: CAMP_TOOLS,
+          tools: getAllToolSpecs(),
           correlationId: correlationId ?? undefined,
           onComposeStart: correlationId
             ? () => {

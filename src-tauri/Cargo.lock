@@ -83,6 +83,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tokio",
  "uuid",
 ]
 
@@ -4615,6 +4616,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2 0.6.2",
  "windows-sys 0.61.2",
 ]
