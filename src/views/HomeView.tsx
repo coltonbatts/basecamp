@@ -233,6 +233,9 @@ export function HomeView() {
           <p>{workspacePath ?? 'Loading workspace...'}</p>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <button type="button" onClick={() => navigate('/settings')}>
+            Settings
+          </button>
           <button type="button" onClick={() => navigate('/arena')}>
             Arena
           </button>
