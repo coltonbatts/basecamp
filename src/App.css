@@ -69,107 +69,41 @@
   color: var(--accent);
 }
 
-.ide-panel-container {
+.main-layout-panels {
   min-height: 0;
   flex: 1;
   display: flex;
+  gap: var(--space-3);
+  width: 100%;
 }
 
-.ide-panel-group,
 .arena-panel-group {
   width: 100%;
   height: 100%;
 }
 
-.ide-resize-handle {
-  width: var(--space-3);
-  position: relative;
-  cursor: col-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ide-resize-handle::after {
-  content: '';
-  width: var(--border-width);
-  height: 100%;
-  background-color: var(--line);
-  transition: background-color 0s;
-}
-
-.ide-resize-handle-horizontal::after {
-  width: 100%;
-  height: var(--border-width);
-}
-
-.ide-resize-handle:hover::after,
-.ide-resize-handle[data-resize-handle-state='drag']::after {
-  background-color: var(--accent);
-}
-
-.ide-pane {
-  min-height: 0;
-  height: 100%;
-}
-
-.ide-explorer,
-.ide-canvas,
-.ide-chat {
-  display: flex;
-  flex-direction: column;
-}
-
-.ide-explorer,
-.ide-canvas,
-.ide-chat {
-  gap: var(--space-3);
-}
-
-.panel-group-vertical-split {
-  display: flex;
-  min-height: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.ide-basecamp-orchestrator {
-  display: flex;
-  flex-direction: column;
+.main-layout-explorer {
+  flex: 0 0 260px;
   min-height: 0;
 }
 
-.basecamp-orchestrator-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
+.main-layout-canvas {
+  flex: 1;
+  min-width: 0;
   min-height: 0;
-  height: 100%;
 }
 
-.basecamp-settings-col {
+.main-layout-chat {
+  flex: 0 0 360px;
   min-height: 0;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-}
-
-.basecamp-composer-col {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 .basecamp-inline-status {
   padding: var(--space-2);
   font-size: var(--text-xs);
-}
-
-.ide-drawer {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
 }
 
 .explorer-section {

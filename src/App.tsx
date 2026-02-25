@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { HomeView } from './views/HomeView';
-import { CampWorkspaceView } from './views/CampWorkspaceView';
+import { MainLayout } from './views/MainLayout';
 import { ArenaView } from './views/ArenaView';
 import { SettingsView } from './views/SettingsView';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -12,7 +12,7 @@ export default function App() {
       <Route path="/home" element={<HomeView />} />
       <Route path="/camp/:id" element={
         <ErrorBoundary>
-          <CampWorkspaceView />
+          <MainLayout />
         </ErrorBoundary>
       } />
       <Route path="/arena" element={<ArenaView />} />
