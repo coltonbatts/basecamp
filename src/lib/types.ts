@@ -200,6 +200,7 @@ export type CampConfig = {
     top_p?: number;
   } | null;
   tools_enabled: boolean;
+  is_team?: boolean;
   created_at: number;
   updated_at: number;
 };
@@ -378,3 +379,117 @@ export type RunStartResult = {
 };
 
 export type ApprovalPolicy = 'manual' | 'auto-safe' | 'full-auto';
+
+export type TeamAgentConfig = {
+  id: string;
+  role: string;
+  model: string;
+  tool_subset: string[];
+  description: string;
+};
+
+export type TeamAgentCreateInput = {
+  id: string;
+  role: string;
+  model: string;
+  tool_subset: string[];
+  description?: string;
+};
+
+export type TeamSettingsUpdateInput = {
+  supervisor_model: string;
+  reflection_loops: boolean;
+  max_reflection_rounds: number;
+};
+
+export type DelegationStep = {
+  step_id: string;
+  assigned_to: string;
+  instruction: string;
+  depends_on: string[];
+  expected_output: string;
+};
+
+export type DecompositionPlan = {
+  task_summary: string;
+  steps: DelegationStep[];
+  reflection_required: boolean;
+};
+
+export type BusTokenUsage = {
+  input: number;
+  output: number;
+};
+
+export type TeamBusEntryType =
+  | 'decomposition'
+  | 'delegation'
+  | 'result'
+  | 'critique'
+  | 'promotion'
+  | 'error';
+
+export type TeamBusEntry = {
+  id: string;
+  timestamp: string;
+  type: TeamBusEntryType;
+  from: string;
+  to: string;
+  step_id?: string | null;
+  content: unknown;
+  token_usage: BusTokenUsage;
+};
+
+export type AgentStepResult = {
+  step_id: string;
+  agent_id: string;
+  output_text: string;
+  draft_path: string;
+  context_writes: string[];
+  token_usage: BusTokenUsage;
+};
+
+export type ReflectionSummary = {
+  artifact_path: string;
+  promoted_path: string;
+  rounds_completed: number;
+  pass: boolean;
+  critiques: Array<{
+    issues: string[];
+    suggestions: string[];
+    pass: boolean;
+  }>;
+};
+
+export type TeamStepStatus = {
+  step_id: string;
+  assigned_to: string;
+  expected_output: string;
+  status: 'pending' | 'running' | 'complete' | 'failed' | string;
+};
+
+export type TeamAgentStatus = {
+  id: string;
+  role: string;
+  model: string;
+  tool_subset: string[];
+  status: 'idle' | 'working' | 'reflecting' | string;
+  token_usage: BusTokenUsage;
+  last_output_preview?: string | null;
+};
+
+export type TeamArtifactsStatus = {
+  drafts: string[];
+  promoted: string[];
+};
+
+export type TeamStatus = {
+  is_team: boolean;
+  supervisor_model: string;
+  reflection_loops: boolean;
+  max_reflection_rounds: number;
+  agents: TeamAgentStatus[];
+  steps: TeamStepStatus[];
+  bus_entries: number;
+  artifacts: TeamArtifactsStatus;
+};

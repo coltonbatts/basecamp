@@ -16,6 +16,7 @@ use tauri::{ipc::Channel, App, Manager, State, Window};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+mod commands;
 mod inspect;
 pub mod mcp;
 mod providers;
@@ -152,11 +153,17 @@ struct CampConfig {
     model_overrides: Option<CampModelOverrides>,
     #[serde(default = "default_tools_enabled")]
     tools_enabled: bool,
+    #[serde(default = "default_is_team")]
+    is_team: bool,
     created_at: i64,
     updated_at: i64,
 }
 
 fn default_tools_enabled() -> bool {
+    false
+}
+
+fn default_is_team() -> bool {
     false
 }
 
@@ -1898,6 +1905,16 @@ fn parse_camp_config_from_json(
         }
     };
 
+    let (is_team_value, is_team_migrated) = parse_bool_field(config_object.get("is_team"));
+    migrated |= is_team_migrated;
+    let is_team = match is_team_value {
+        Some(value) => value,
+        None => {
+            migrated = true;
+            default_is_team()
+        }
+    };
+
     let (created_at_value, created_at_migrated) =
         parse_timestamp_field(config_object.get("created_at"));
     migrated |= created_at_migrated;
@@ -1937,6 +1954,7 @@ fn parse_camp_config_from_json(
             model_id,
             model_overrides,
             tools_enabled,
+            is_team,
             created_at,
             updated_at,
         },
@@ -4106,6 +4124,7 @@ fn camp_create(
         model_id,
         model_overrides: None,
         tools_enabled: payload.tools_enabled.unwrap_or(default_tools_enabled()),
+        is_team: default_is_team(),
         created_at: now,
         updated_at: now,
     };
@@ -4770,6 +4789,15 @@ pub fn run() {
             camp_update_artifact,
             camp_toggle_artifact_archive,
             camp_increment_artifact_usage,
+            commands::team::create_team_agent,
+            commands::team::remove_team_agent,
+            commands::team::update_team_settings,
+            commands::team::decompose_task,
+            commands::team::execute_agent_step,
+            commands::team::run_reflection_loop,
+            commands::team::get_team_bus,
+            commands::team::promote_artifact,
+            commands::team::get_team_status,
             mcp::mcp_register_server,
             mcp::mcp_list_servers,
             mcp::mcp_discover_tools,

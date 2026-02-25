@@ -2,10 +2,13 @@ import { invoke } from '@tauri-apps/api/core';
 
 import type {
   ApprovalPolicy,
+  AgentStepResult,
   Camp,
   CampArtifact,
   CampArtifactMetadata,
   CampAppendMessagePayload,
+  DecompositionPlan,
+  DelegationStep,
   CampCreateArtifactFromMessagePayload,
   CampCreatePayload,
   CampMessage,
@@ -21,6 +24,7 @@ import type {
   ProviderKind,
   ProviderModelsRefreshResult,
   ProviderRegistryRow,
+  ReflectionSummary,
   Run,
   RunInsertPayload,
   RunSearchDbArgs,
@@ -28,6 +32,11 @@ import type {
   RunStartConfig,
   RunStartResult,
   RunStateEvent,
+  TeamAgentConfig,
+  TeamAgentCreateInput,
+  TeamBusEntry,
+  TeamSettingsUpdateInput,
+  TeamStatus,
   RunUpdatePayload,
   ToolCallRow,
   ToolCallStartPayload,
@@ -340,6 +349,42 @@ export async function campListContextFiles(campId: string, path?: string): Promi
 
 export async function campWriteContextFile(campId: string, path: string, content: string): Promise<void> {
   await invoke('tauri_cmd_write_context_file', { campId, path, content });
+}
+
+export async function createTeamAgent(campId: string, agentConfig: TeamAgentCreateInput): Promise<TeamAgentConfig> {
+  return invoke<TeamAgentConfig>('create_team_agent', { campId, agentConfig });
+}
+
+export async function removeTeamAgent(campId: string, agentId: string): Promise<void> {
+  await invoke('remove_team_agent', { campId, agentId });
+}
+
+export async function updateTeamSettings(campId: string, settings: TeamSettingsUpdateInput): Promise<TeamStatus> {
+  return invoke<TeamStatus>('update_team_settings', { campId, settings });
+}
+
+export async function decomposeTask(campId: string, userTask: string): Promise<DecompositionPlan> {
+  return invoke<DecompositionPlan>('decompose_task', { campId, userTask });
+}
+
+export async function executeAgentStep(campId: string, agentId: string, step: DelegationStep): Promise<AgentStepResult> {
+  return invoke<AgentStepResult>('execute_agent_step', { campId, agentId, step });
+}
+
+export async function runReflectionLoop(campId: string, artifactPath: string, rounds: number): Promise<ReflectionSummary> {
+  return invoke<ReflectionSummary>('run_reflection_loop', { campId, artifactPath, rounds });
+}
+
+export async function getTeamBus(campId: string): Promise<TeamBusEntry[]> {
+  return invoke<TeamBusEntry[]>('get_team_bus', { campId });
+}
+
+export async function promoteArtifact(campId: string, draftPath: string): Promise<string> {
+  return invoke<string>('promote_artifact', { campId, draftPath });
+}
+
+export async function getTeamStatus(campId: string): Promise<TeamStatus> {
+  return invoke<TeamStatus>('get_team_status', { campId });
 }
 
 // ── Agent Run State ──────────────────────────────────────────────

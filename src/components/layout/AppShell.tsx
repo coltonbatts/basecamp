@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import './AppShell.css'; // We'll add a specific CSS file or put it in App.css
 
 interface AppShellProps {

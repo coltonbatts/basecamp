@@ -8,6 +8,8 @@ import { AppShell } from '../components/layout/AppShell';
 import { LeftPane } from '../components/layout/LeftPane';
 import { CenterPane } from '../components/layout/CenterPane';
 import { RightPane } from '../components/layout/RightPane';
+import { TeamArena } from '../components/TeamArena';
+import { TeamConfig } from '../components/TeamConfig';
 import { InspectPanel, type InspectFileWrite, type InspectTurnData } from '../components/InspectPanel';
 import { TranscriptView } from '../components/TranscriptView';
 import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
@@ -254,6 +256,7 @@ export function MainLayout() {
   // Layout states
   const [leftTab, setLeftTab] = useState<'camps' | 'files' | 'context'>('camps');
   const [centerMode, setCenterMode] = useState<string>('editor');
+  const [rightMode, setRightMode] = useState<'chat' | 'team'>('chat');
   const [leftPaneWidth, setLeftPaneWidth] = useState(260);
   const [rightPaneWidth, setRightPaneWidth] = useState(360);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
@@ -692,6 +695,17 @@ export function MainLayout() {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load camp.');
     });
   }, [selectedCampId, loadSelectedCamp]);
+
+  useEffect(() => {
+    if (!selectedCamp?.config.is_team) {
+      if (centerMode === 'team') {
+        setCenterMode('editor');
+      }
+      if (rightMode === 'team') {
+        setRightMode('chat');
+      }
+    }
+  }, [centerMode, rightMode, selectedCamp?.config.is_team]);
 
   useEffect(() => {
     pruneSelectedArtifacts(artifacts.map((artifact) => artifact.id));
@@ -1847,54 +1861,66 @@ export function MainLayout() {
       centerPane={
         <CenterPane
           mode={centerMode}
-          modes={['editor']}
+          modes={selectedCamp?.config.is_team ? ['editor', 'team'] : ['editor']}
           onModeChange={setCenterMode}
           renderHeaderActions={() => (
             <>
-              <button
-                type="button"
-                className="primary-action icon-button"
-                onClick={handleSaveContextFile}
-                disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
-                title="Save File"
-              >
-                {isSavingContextFile ? '...' : '💾'}
-              </button>
+              {centerMode === 'editor' ? (
+                <button
+                  type="button"
+                  className="primary-action icon-button"
+                  onClick={handleSaveContextFile}
+                  disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
+                  title="Save File"
+                >
+                  {isSavingContextFile ? '...' : '💾'}
+                </button>
+              ) : null}
             </>
           )}
-          renderContent={() => (
-            <div className="canvas-editor-shell" style={{ border: 'none', background: 'transparent', flex: '1', minHeight: 0, padding: 'var(--space-2)', display: 'flex', flexDirection: 'column' }}>
-              {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
-              {selectedCamp && !selectedContextFilePath ? <p className="hint">Select a file from the explorer to view or edit.</p> : null}
-              {selectedCamp && selectedContextFilePath ? (
-                isLoadingContextFile ? (
-                  <p className="hint">Loading file...</p>
-                ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
-                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
-                    <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
-                  </div>
-                ) : /\.pdf$/i.test(selectedContextFilePath) ? (
-                  <div style={{ width: '100%', height: '100%' }}>
-                    <object data={`data:application/pdf;base64,${contextFileDraft}`} type="application/pdf" width="100%" height="100%">
-                      <p>Browser cannot display PDF.</p>
-                    </object>
-                  </div>
-                ) : /\.html?$/i.test(selectedContextFilePath) ? (
-                  <div style={{ width: '100%', height: '100%', background: 'white' }}>
-                    <iframe srcDoc={contextFileDraft} sandbox="allow-scripts allow-popups" style={{ width: '100%', height: '100%', border: 'none' }} title="Preview" />
-                  </div>
-                ) : (
-                  <textarea
-                    className="canvas-editor"
-                    value={contextFileDraft}
-                    onChange={(event) => setContextFileDraft(event.target.value)}
-                    spellCheck={false}
-                    style={{ flex: 1, minHeight: 0, margin: 0, padding: 0 }}
-                  />
-                )
-              ) : null}
-            </div>
-          )}
+          renderContent={() => {
+            if (centerMode === 'team' && selectedCampId) {
+              return (
+                <div className="canvas-editor-shell" style={{ border: 'none', background: 'transparent', flex: '1', minHeight: 0, padding: 'var(--space-2)', display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+                  <TeamConfig campId={selectedCampId} modelOptions={modelOptions} />
+                </div>
+              );
+            }
+
+            return (
+              <div className="canvas-editor-shell" style={{ border: 'none', background: 'transparent', flex: '1', minHeight: 0, padding: 'var(--space-2)', display: 'flex', flexDirection: 'column' }}>
+                {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
+                {selectedCamp && !selectedContextFilePath ? <p className="hint">Select a file from the explorer to view or edit.</p> : null}
+                {selectedCamp && selectedContextFilePath ? (
+                  isLoadingContextFile ? (
+                    <p className="hint">Loading file...</p>
+                  ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
+                    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
+                      <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
+                    </div>
+                  ) : /\.pdf$/i.test(selectedContextFilePath) ? (
+                    <div style={{ width: '100%', height: '100%' }}>
+                      <object data={`data:application/pdf;base64,${contextFileDraft}`} type="application/pdf" width="100%" height="100%">
+                        <p>Browser cannot display PDF.</p>
+                      </object>
+                    </div>
+                  ) : /\.html?$/i.test(selectedContextFilePath) ? (
+                    <div style={{ width: '100%', height: '100%', background: 'white' }}>
+                      <iframe srcDoc={contextFileDraft} sandbox="allow-scripts allow-popups" style={{ width: '100%', height: '100%', border: 'none' }} title="Preview" />
+                    </div>
+                  ) : (
+                    <textarea
+                      className="canvas-editor"
+                      value={contextFileDraft}
+                      onChange={(event) => setContextFileDraft(event.target.value)}
+                      spellCheck={false}
+                      style={{ flex: 1, minHeight: 0, margin: 0, padding: 0 }}
+                    />
+                  )
+                ) : null}
+              </div>
+            );
+          }}
         />
       }
       rightPane={
@@ -1902,93 +1928,129 @@ export function MainLayout() {
           renderTranscript={() => (
             <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
               <div className="chat-header" style={{ padding: 'var(--space-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ fontWeight: 'bold' }}>CHAT</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                  {selectedCamp?.config.is_team ? (
+                    <>
+                      <button
+                        type="button"
+                        className={`mode-tab ${rightMode === 'chat' ? 'active' : ''}`}
+                        onClick={() => setRightMode('chat')}
+                      >
+                        CHAT
+                      </button>
+                      <button
+                        type="button"
+                        className={`mode-tab ${rightMode === 'team' ? 'active' : ''}`}
+                        onClick={() => setRightMode('team')}
+                      >
+                        TEAM
+                      </button>
+                    </>
+                  ) : (
+                    <div style={{ fontWeight: 'bold' }}>CHAT</div>
+                  )}
+                </div>
                 {selectedCamp && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-                    <label className="settings-toggle" style={{ margin: 0, display: 'flex', gap: '6px' }}>
-                      <input
-                        type="checkbox"
-                        checked={draftToolsEnabled}
-                        disabled={!selectedModelSupportsTools}
-                        onChange={(event) => setDraftToolsEnabled(event.target.checked)}
-                      />
-                      <span style={{ fontSize: '0.8rem' }}>Tools</span>
-                    </label>
+                    {rightMode === 'chat' ? (
+                      <label className="settings-toggle" style={{ margin: 0, display: 'flex', gap: '6px' }}>
+                        <input
+                          type="checkbox"
+                          checked={draftToolsEnabled}
+                          disabled={!selectedModelSupportsTools}
+                          onChange={(event) => setDraftToolsEnabled(event.target.checked)}
+                        />
+                        <span style={{ fontSize: '0.8rem' }}>Tools</span>
+                      </label>
+                    ) : null}
                   </div>
                 )}
               </div>
-              <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-                <TranscriptView
-                  selectedCamp={selectedCamp}
-                  streamingText={streamingText}
-                  artifactById={artifactById}
-                  isSending={isSending}
-                  promotingMessageId={promotingMessageId}
-                  onBranchFromMessage={handleBranchFromMessage}
-                  onReplayFromMessage={handleReplayFromMessage}
-                  onPromoteMessageToArtifact={(message) => {
-                    void handlePromoteMessageToArtifact(message);
-                  }}
-                />
-              </div>
-
-              {toolApprovalQueue.length > 0 && (
-                <section className="tool-approval-queue" style={{ maxHeight: '200px', border: 'none', borderTop: 'var(--border-width) solid var(--line)', background: 'transparent' }}>
-                  <header className="panel-header" style={{ padding: 'var(--space-1) 0' }}>
-                    <h2 style={{ fontSize: 'var(--text-xs)' }}>TOOL QUEUE</h2>
-                    <div className="tool-queue-actions">
-                      <button
-                        type="button"
-                        onClick={handleApproveAllPendingToolCalls}
-                        disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
-                        title="Approve All"
-                        style={{ padding: '2px 4px', fontSize: '10px' }}
-                      >
-                        [APPROVE] ALL
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleRejectAllPendingToolCalls}
-                        disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
-                        title="Reject All"
-                        style={{ padding: '2px 4px', fontSize: '10px' }}
-                      >
-                        [REJECT] ALL
-                      </button>
-                    </div>
-                  </header>
-                  <div className="tool-queue-list">
-                    {toolApprovalQueue.map((item) => (
-                      <article key={item.id} className={`tool-queue-item ${item.status}`} style={{ padding: 'var(--space-1)' }}>
-                        <header>
-                          <strong style={{ fontSize: '10px' }}>{item.name}</strong>
-                          <span style={{ fontSize: '10px' }}>{item.status}</span>
-                        </header>
-                        {item.status === 'pending' ? (
-                          <div className="tool-queue-item-actions" style={{ marginTop: 'var(--space-1)' }}>
-                            <button type="button" onClick={() => handleApproveToolCall(item.id)}>[APPROVE]</button>
-                            <button type="button" onClick={() => handleRejectToolCall(item.id)}>[REJECT]</button>
-                          </div>
-                        ) : null}
-                      </article>
-                    ))}
+              {rightMode === 'team' && selectedCamp ? (
+                <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 'var(--space-1)' }}>
+                  <TeamArena campId={selectedCamp.config.id} />
+                </div>
+              ) : (
+                <>
+                  <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+                    <TranscriptView
+                      selectedCamp={selectedCamp}
+                      streamingText={streamingText}
+                      artifactById={artifactById}
+                      isSending={isSending}
+                      promotingMessageId={promotingMessageId}
+                      onBranchFromMessage={handleBranchFromMessage}
+                      onReplayFromMessage={handleReplayFromMessage}
+                      onPromoteMessageToArtifact={(message) => {
+                        void handlePromoteMessageToArtifact(message);
+                      }}
+                    />
                   </div>
-                </section>
-              )}
 
-              <InspectPanel
-                enabled={developerInspectMode}
-                turn={inspectTurn}
-                exporting={inspectExporting}
-                exportError={inspectExportError}
-                onExport={() => {
-                  void handleExportTurnBundle();
-                }}
-              />
+                  {toolApprovalQueue.length > 0 && (
+                    <section className="tool-approval-queue" style={{ maxHeight: '200px', border: 'none', borderTop: 'var(--border-width) solid var(--line)', background: 'transparent' }}>
+                      <header className="panel-header" style={{ padding: 'var(--space-1) 0' }}>
+                        <h2 style={{ fontSize: 'var(--text-xs)' }}>TOOL QUEUE</h2>
+                        <div className="tool-queue-actions">
+                          <button
+                            type="button"
+                            onClick={handleApproveAllPendingToolCalls}
+                            disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                            title="Approve All"
+                            style={{ padding: '2px 4px', fontSize: '10px' }}
+                          >
+                            [APPROVE] ALL
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleRejectAllPendingToolCalls}
+                            disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                            title="Reject All"
+                            style={{ padding: '2px 4px', fontSize: '10px' }}
+                          >
+                            [REJECT] ALL
+                          </button>
+                        </div>
+                      </header>
+                      <div className="tool-queue-list">
+                        {toolApprovalQueue.map((item) => (
+                          <article key={item.id} className={`tool-queue-item ${item.status}`} style={{ padding: 'var(--space-1)' }}>
+                            <header>
+                              <strong style={{ fontSize: '10px' }}>{item.name}</strong>
+                              <span style={{ fontSize: '10px' }}>{item.status}</span>
+                            </header>
+                            {item.status === 'pending' ? (
+                              <div className="tool-queue-item-actions" style={{ marginTop: 'var(--space-1)' }}>
+                                <button type="button" onClick={() => handleApproveToolCall(item.id)}>[APPROVE]</button>
+                                <button type="button" onClick={() => handleRejectToolCall(item.id)}>[REJECT]</button>
+                              </div>
+                            ) : null}
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  <InspectPanel
+                    enabled={developerInspectMode}
+                    turn={inspectTurn}
+                    exporting={inspectExporting}
+                    exportError={inspectExportError}
+                    onExport={() => {
+                      void handleExportTurnBundle();
+                    }}
+                  />
+                </>
+              )}
             </div>
           )}
           renderComposer={() => (
-            <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ border: 'none', borderTop: 'var(--border-width) solid var(--line)', padding: 'var(--space-2)', margin: 0 }}>
+            rightMode === 'team' ? (
+              <div style={{ borderTop: 'var(--border-width) solid var(--line)', padding: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                Team mode active. Use Team Arena to decompose and execute tasks.
+              </div>
+            ) : (
+              <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ border: 'none', borderTop: 'var(--border-width) solid var(--line)', padding: 'var(--space-2)', margin: 0 }}>
               {userAttachments.length > 0 && (
                 <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
                   {userAttachments.map((att, idx) => (
@@ -2023,7 +2085,8 @@ export function MainLayout() {
                   {isSending ? '...' : '[SEND]'}
                 </button>
               </div>
-            </form>
+              </form>
+            )
           )}
         />
       }
