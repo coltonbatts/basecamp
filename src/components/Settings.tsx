@@ -208,7 +208,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
                 autoComplete="off"
-                placeholder="sk-or-v1-..."
+                placeholder="OpenRouter API key"
               />
             </label>
 

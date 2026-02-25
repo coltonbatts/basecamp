@@ -267,9 +267,9 @@ mod tests {
     #[test]
     fn redactor_masks_api_key_and_secret_fields() {
         let raw = serde_json::json!({
-            "api_key": "sk-or-v1-secret-123",
+            "api_key": "openrouter_test_key_123",
             "headers": {
-                "Authorization": "Bearer sk-or-v1-secret-123",
+                "Authorization": "Bearer openrouter_test_key_123",
                 "X-Title": "Basecamp"
             },
             "nested": {
@@ -282,7 +282,7 @@ mod tests {
         let serialized =
             serde_json::to_string(&sanitized).expect("sanitized value should serialize");
 
-        assert!(!serialized.contains("sk-or-v1-secret-123"));
+        assert!(!serialized.contains("openrouter_test_key_123"));
         assert!(!serialized.contains("abc123"));
         assert!(serialized.contains(REDACTED));
         assert!(serialized.contains("Basecamp"));
@@ -311,7 +311,7 @@ mod tests {
             correlation_id,
             &serde_json::json!({
                 "model": "openrouter/auto",
-                "api_key": "sk-or-v1-secret-123"
+                "api_key": "openrouter_test_key_123"
             }),
         )
         .expect("request file should write");
@@ -348,7 +348,7 @@ mod tests {
         assert!(bundle_path.exists());
 
         let request_raw = fs::read_to_string(request_path).expect("request file should read");
-        assert!(!request_raw.contains("sk-or-v1-secret-123"));
+        assert!(!request_raw.contains("openrouter_test_key_123"));
         assert!(request_raw.contains(REDACTED));
 
         let _ = fs::remove_dir_all(camp_dir);
