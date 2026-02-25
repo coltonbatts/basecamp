@@ -6,6 +6,8 @@ type TranscriptViewProps = {
   artifactById: Map<string, CampArtifactMetadata>;
   isSending: boolean;
   promotingMessageId: string | null;
+  onBranchFromMessage: (message: CampMessage) => void;
+  onReplayFromMessage: (message: CampMessage) => void;
   onPromoteMessageToArtifact: (message: CampMessage) => void;
 };
 
@@ -52,6 +54,24 @@ export function TranscriptView(props: TranscriptViewProps) {
                 >
                   {props.promotingMessageId === message.id ? 'Saving...' : 'Save Artifact'}
                 </button>
+              ) : null}
+              {message.role === 'assistant' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => props.onBranchFromMessage(message)}
+                    disabled={!props.selectedCamp || props.isSending}
+                  >
+                    Branch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => props.onReplayFromMessage(message)}
+                    disabled={!props.selectedCamp || props.isSending}
+                  >
+                    Replay
+                  </button>
+                </>
               ) : null}
             </div>
           </header>

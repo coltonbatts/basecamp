@@ -4,10 +4,13 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import '../App.css';
 import { TranscriptView } from '../components/TranscriptView';
+import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
 import {
   campAppendMessage,
   campCreate,
   campCreateArtifactFromMessage,
+  campGetArtifact,
+  campIncrementArtifactUsage,
   campListContextFiles,
   campList,
   campListArtifacts,
@@ -24,21 +27,14 @@ import {
 } from '../lib/db';
 import { runCampChatRuntime } from '../lib/campChatRuntime';
 import { syncModelsToDb } from '../lib/models';
-import { OpenRouterRequestError } from '../lib/openrouter';
+import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
 import { executeFilesystemToolCall, FILESYSTEM_TOOLS } from '../lib/tools';
-import type { Camp, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
+import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_TEMPERATURE = 0.3;
-
-function prettyJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    return '{}';
-  }
-}
+const TOOL_REJECT_MESSAGE = 'Tool call rejected by user.';
 
 function modelDisplayLabel(model: ModelRow): string {
   const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
@@ -59,6 +55,27 @@ type MutableContextTreeNode = {
   kind: 'dir' | 'file';
   children: Map<string, MutableContextTreeNode>;
 };
+
+type ToolApprovalDecision = 'approve' | 'reject';
+type ToolApprovalStatus = 'pending' | 'approved' | 'running' | 'rejected' | 'done' | 'error';
+
+type ToolApprovalItem = {
+  id: string;
+  name: string;
+  argsJson: string;
+  status: ToolApprovalStatus;
+  resultPreview: string | null;
+  errorMessage: string | null;
+  createdAt: number;
+};
+
+function truncatePreview(value: string, maxLength = 160): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 3)}...`;
+}
 
 function buildContextTree(paths: string[]): ContextTreeNode[] {
   const root = new Map<string, MutableContextTreeNode>();
@@ -151,12 +168,25 @@ export function MainLayout() {
   const [contextFileDraft, setContextFileDraft] = useState('');
   const [isLoadingContextFile, setIsLoadingContextFile] = useState(false);
   const [collapsedContextDirs, setCollapsedContextDirs] = useState<string[]>([]);
+  const [toolApprovalQueue, setToolApprovalQueue] = useState<ToolApprovalItem[]>([]);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const toolApprovalResolversRef = useRef(new Map<string, (decision: ToolApprovalDecision) => void>());
 
   const modelOptions = useMemo(() => (models.length > 0 ? models.map((model) => model.id) : [FALLBACK_MODEL]), [models]);
   const modelOptionsWithLabels = useMemo(() => (models.length > 0 ? models.map((model) => ({ id: model.id, label: modelDisplayLabel(model) })) : [{ id: FALLBACK_MODEL, label: FALLBACK_MODEL }]), [models]);
 
   const artifactById = useMemo(() => new Map(artifacts.map((artifact) => [artifact.id, artifact])), [artifacts]);
+  const {
+    artifactQuery,
+    setArtifactQuery,
+    selectedArtifactIds,
+    selectedArtifactsForComposer,
+    visibleArtifacts,
+    toggleArtifactSelection,
+    removeSelectedArtifact,
+    clearSelectedArtifacts,
+    pruneSelectedArtifacts,
+  } = useArtifactComposerState(artifacts);
 
   const contextTree = useMemo(() => buildContextTree(attachedContextFiles), [attachedContextFiles]);
   const contextFileDirty = selectedContextFilePath ? contextFileDraft !== selectedContextFileContent : false;
@@ -276,9 +306,8 @@ export function MainLayout() {
   }, [selectedCampId, loadSelectedCamp]);
 
   useEffect(() => {
-    if (!selectedCampId || isSending) { return; }
-    composerTextareaRef.current?.focus();
-  }, [isSending, selectedCampId]);
+    pruneSelectedArtifacts(artifacts.map((artifact) => artifact.id));
+  }, [artifacts, pruneSelectedArtifacts]);
 
   useEffect(() => {
     if (!selectedCampId) {
@@ -302,6 +331,158 @@ export function MainLayout() {
 
     setSelectedContextFilePath(attachedContextFiles[0] ?? null);
   }, [attachedContextFiles, selectedCampId, selectedContextFilePath]);
+
+  useEffect(() => {
+    const resolvers = toolApprovalResolversRef.current;
+    return () => {
+      for (const resolve of resolvers.values()) {
+        resolve('reject');
+      }
+      resolvers.clear();
+    };
+  }, []);
+
+  const clearToolApprovalQueue = useCallback(() => {
+    for (const resolve of toolApprovalResolversRef.current.values()) {
+      resolve('reject');
+    }
+    toolApprovalResolversRef.current.clear();
+    setToolApprovalQueue([]);
+  }, []);
+
+  useEffect(() => {
+    clearSelectedArtifacts();
+    clearToolApprovalQueue();
+  }, [clearSelectedArtifacts, clearToolApprovalQueue, selectedCampId]);
+
+  useEffect(() => {
+    if (!selectedCampId || isSending) { return; }
+    composerTextareaRef.current?.focus();
+  }, [isSending, selectedCampId]);
+
+  const upsertToolApprovalItem = useCallback((nextItem: ToolApprovalItem) => {
+    setToolApprovalQueue((previous) => {
+      const existingIndex = previous.findIndex((item) => item.id === nextItem.id);
+      if (existingIndex === -1) {
+        return [nextItem, ...previous];
+      }
+
+      return previous.map((item) => (item.id === nextItem.id ? nextItem : item));
+    });
+  }, []);
+
+  const resolveToolApproval = useCallback((toolCallId: string, decision: ToolApprovalDecision) => {
+    const resolver = toolApprovalResolversRef.current.get(toolCallId);
+    if (!resolver) {
+      return;
+    }
+
+    toolApprovalResolversRef.current.delete(toolCallId);
+    setToolApprovalQueue((previous) =>
+      previous.map((item) =>
+        item.id === toolCallId
+          ? {
+            ...item,
+            status: decision === 'approve' ? 'approved' : 'rejected',
+            errorMessage: decision === 'reject' ? TOOL_REJECT_MESSAGE : item.errorMessage,
+          }
+          : item,
+      ),
+    );
+    resolver(decision);
+  }, []);
+
+  const handleApproveToolCall = useCallback((toolCallId: string) => {
+    resolveToolApproval(toolCallId, 'approve');
+  }, [resolveToolApproval]);
+
+  const handleRejectToolCall = useCallback((toolCallId: string) => {
+    resolveToolApproval(toolCallId, 'reject');
+  }, [resolveToolApproval]);
+
+  const handleApproveAllPendingToolCalls = useCallback(() => {
+    const pendingIds = toolApprovalQueue.filter((item) => item.status === 'pending').map((item) => item.id);
+    for (const id of pendingIds) {
+      resolveToolApproval(id, 'approve');
+    }
+  }, [resolveToolApproval, toolApprovalQueue]);
+
+  const handleRejectAllPendingToolCalls = useCallback(() => {
+    const pendingIds = toolApprovalQueue.filter((item) => item.status === 'pending').map((item) => item.id);
+    for (const id of pendingIds) {
+      resolveToolApproval(id, 'reject');
+    }
+  }, [resolveToolApproval, toolApprovalQueue]);
+
+  const executeToolCallWithApproval = useCallback(
+    async (
+      campId: string,
+      toolCall: OpenRouterToolCall & { id: string },
+    ): Promise<string> => {
+      const argsJson = toolCall.function.arguments ?? '{}';
+      const pendingItem: ToolApprovalItem = {
+        id: toolCall.id,
+        name: toolCall.function.name,
+        argsJson,
+        status: 'pending',
+        resultPreview: null,
+        errorMessage: null,
+        createdAt: Date.now(),
+      };
+      upsertToolApprovalItem(pendingItem);
+
+      const decision = await new Promise<ToolApprovalDecision>((resolve) => {
+        toolApprovalResolversRef.current.set(toolCall.id, resolve);
+      });
+
+      if (decision === 'reject') {
+        return JSON.stringify({ error: TOOL_REJECT_MESSAGE });
+      }
+
+      setToolApprovalQueue((previous) =>
+        previous.map((item) => (item.id === toolCall.id ? { ...item, status: 'running' } : item)),
+      );
+
+      try {
+        const toolResult = await executeFilesystemToolCall(toolCall, {
+          readFile: async (path) => campReadContextFile(campId, path),
+          listFiles: async (path) => campListContextFiles(campId, path),
+          writeFile: async (path, content) => campWriteContextFile(campId, path, content),
+        });
+
+        setToolApprovalQueue((previous) =>
+          previous.map((item) =>
+            item.id === toolCall.id
+              ? {
+                ...item,
+                status: 'done',
+                resultPreview: truncatePreview(toolResult.replace(/\s+/g, ' ').trim()),
+                errorMessage: null,
+              }
+              : item,
+          ),
+        );
+
+        return toolResult;
+      } catch (toolError) {
+        const errorMessage = toolError instanceof Error ? toolError.message : 'Tool execution failed.';
+        setToolApprovalQueue((previous) =>
+          previous.map((item) =>
+            item.id === toolCall.id
+              ? {
+                ...item,
+                status: 'error',
+                errorMessage,
+              }
+              : item,
+          ),
+        );
+
+        return JSON.stringify({ error: errorMessage });
+      }
+    },
+    [upsertToolApprovalItem],
+  );
 
   useEffect(() => {
     if (!selectedCampId || !selectedContextFilePath) {
@@ -499,17 +680,22 @@ export function MainLayout() {
     setStreamingText('');
     setError(null);
     setStatus(null);
+    clearToolApprovalQueue();
 
     try {
       const apiKey = await getApiKey();
       if (!apiKey) throw new Error('OpenRouter API key is missing. Save it in Settings first.');
 
       await persistCampDraftsForSend();
+      const selectedArtifactsForRequest: CampArtifact[] = await Promise.all(
+        selectedArtifactIds.map((artifactId) => campGetArtifact(selectedCampId, artifactId)),
+      );
 
       await campAppendMessage({
         camp_id: selectedCampId,
         role: 'user',
         content: trimmedMessage,
+        included_artifact_ids: selectedArtifactIds.length > 0 ? selectedArtifactIds : undefined,
       });
 
       const campWithUser = await campLoad(selectedCampId);
@@ -519,7 +705,7 @@ export function MainLayout() {
         runCampChatRuntime({
           campId: selectedCampId,
           camp: campForRuntime,
-          selectedArtifacts: [],
+          selectedArtifacts: selectedArtifactsForRequest,
           apiKey,
           temperature,
           maxTokens,
@@ -528,11 +714,7 @@ export function MainLayout() {
           },
           tools: FILESYSTEM_TOOLS,
           executeToolCall: async ({ campId, toolCall }) => {
-            return executeFilesystemToolCall(toolCall, {
-              readFile: async (path) => campReadContextFile(campId, path),
-              listFiles: async (path) => campListContextFiles(campId, path),
-              writeFile: async (path, content) => campWriteContextFile(campId, path, content),
-            });
+            return executeToolCallWithApproval(campId, toolCall);
           },
         });
 
@@ -547,10 +729,15 @@ export function MainLayout() {
 
       const updatedCamp = await campLoad(selectedCampId);
       setSelectedCamp(updatedCamp);
+      const usageIncrementPromise =
+        selectedArtifactIds.length > 0
+          ? campIncrementArtifactUsage(selectedCampId, selectedArtifactIds)
+          : Promise.resolve();
       const [, , refreshedContextFiles] = await Promise.all([
         loadCamps(),
         loadArtifacts(selectedCampId),
         loadCampContextFiles(selectedCampId),
+        usageIncrementPromise,
       ]);
       setAttachedContextFiles(refreshedContextFiles);
 
@@ -570,6 +757,14 @@ export function MainLayout() {
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleBranchFromMessage = (message: CampMessage) => {
+    setStatus(`Branch from message ${message.id.slice(0, 8)} is coming soon.`);
+  };
+
+  const handleReplayFromMessage = (message: CampMessage) => {
+    setStatus(`Replay from message ${message.id.slice(0, 8)} is coming soon.`);
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -752,10 +947,116 @@ export function MainLayout() {
             artifactById={artifactById}
             isSending={isSending}
             promotingMessageId={promotingMessageId}
+            onBranchFromMessage={handleBranchFromMessage}
+            onReplayFromMessage={handleReplayFromMessage}
             onPromoteMessageToArtifact={(message) => {
               void handlePromoteMessageToArtifact(message);
             }}
           />
+
+          <section className="composer-artifact-drawer">
+            <header className="panel-header">
+              <h2>ARTIFACTS</h2>
+              <button type="button" onClick={clearSelectedArtifacts} disabled={selectedArtifactIds.length === 0}>
+                Clear
+              </button>
+            </header>
+            <label>
+              <span>Search Artifacts</span>
+              <input
+                type="text"
+                value={artifactQuery}
+                onChange={(event) => setArtifactQuery(event.target.value)}
+                placeholder="Filter by title or tag"
+                disabled={!selectedCamp}
+              />
+            </label>
+            {selectedArtifactsForComposer.length > 0 ? (
+              <div className="artifact-chip-row">
+                {selectedArtifactsForComposer.map((artifact) => (
+                  <button
+                    key={artifact.id}
+                    type="button"
+                    className="artifact-chip selectable"
+                    onClick={() => removeSelectedArtifact(artifact.id)}
+                    title="Remove from next message"
+                  >
+                    {artifact.title}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="hint">No artifacts selected for this prompt.</p>
+            )}
+            <div className="artifact-scroll composer-artifact-scroll">
+              {visibleArtifacts.map((artifact) => {
+                const isSelected = selectedArtifactIds.includes(artifact.id);
+                return (
+                  <button
+                    key={artifact.id}
+                    type="button"
+                    className={`artifact-item artifact-select-toggle ${isSelected ? 'is-selected' : ''}`}
+                    onClick={() => toggleArtifactSelection(artifact.id)}
+                    disabled={!selectedCamp || isSending}
+                  >
+                    <strong>{artifact.title}</strong>
+                    <p>{artifact.tags.length > 0 ? artifact.tags.join(', ') : 'No tags'}</p>
+                  </button>
+                );
+              })}
+              {selectedCamp && visibleArtifacts.length === 0 ? (
+                <p className="hint">No artifacts found for this filter.</p>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="tool-approval-queue">
+            <header className="panel-header">
+              <h2>TOOL QUEUE</h2>
+              <div className="tool-queue-actions">
+                <button
+                  type="button"
+                  onClick={handleApproveAllPendingToolCalls}
+                  disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                >
+                  Approve All
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRejectAllPendingToolCalls}
+                  disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                >
+                  Reject All
+                </button>
+              </div>
+            </header>
+            <div className="tool-queue-list">
+              {toolApprovalQueue.map((item) => (
+                <article key={item.id} className={`tool-queue-item ${item.status}`}>
+                  <header>
+                    <strong>{item.name}</strong>
+                    <span>{item.status}</span>
+                  </header>
+                  <p className="tool-queue-args">{item.argsJson}</p>
+                  {item.resultPreview ? <p className="hint">Result: {item.resultPreview}</p> : null}
+                  {item.errorMessage ? <p className="tool-queue-error">{item.errorMessage}</p> : null}
+                  {item.status === 'pending' ? (
+                    <div className="tool-queue-item-actions">
+                      <button type="button" onClick={() => handleApproveToolCall(item.id)}>
+                        Approve
+                      </button>
+                      <button type="button" onClick={() => handleRejectToolCall(item.id)}>
+                        Reject
+                      </button>
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+              {toolApprovalQueue.length === 0 ? (
+                <p className="hint">No tool calls in this run yet.</p>
+              ) : null}
+            </div>
+          </section>
 
           <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ borderTop: 'var(--border-width) solid var(--line)', paddingTop: 'var(--space-3)' }}>
             <textarea

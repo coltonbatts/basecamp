@@ -511,6 +511,122 @@ label span,
   text-transform: uppercase;
 }
 
+.composer-artifact-scroll {
+  max-height: 180px;
+}
+
+.artifact-select-toggle {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0s, color 0s;
+}
+
+.artifact-select-toggle.is-selected {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+
+.artifact-select-toggle.is-selected p {
+  color: var(--bg);
+}
+
+.tool-approval-queue {
+  border: var(--border-width) solid var(--line);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+      100% var(--corner), 100% calc(100% - var(--corner)),
+      calc(100% - var(--corner)) 100%, var(--corner) 100%,
+      0 calc(100% - var(--corner)), 0 var(--corner));
+}
+
+.tool-queue-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.tool-queue-actions button {
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.tool-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 220px;
+  overflow: auto;
+}
+
+.tool-queue-item {
+  border: var(--border-width) solid var(--line);
+  padding: var(--space-2);
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+      100% var(--corner), 100% calc(100% - var(--corner)),
+      calc(100% - var(--corner)) 100%, var(--corner) 100%,
+      0 calc(100% - var(--corner)), 0 var(--corner));
+}
+
+.tool-queue-item.pending {
+  border-color: var(--accent);
+}
+
+.tool-queue-item header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.tool-queue-item strong,
+.tool-queue-item span {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tool-queue-item span {
+  color: var(--text-muted);
+}
+
+.tool-queue-args {
+  margin: 0;
+  border: var(--border-width) solid var(--line);
+  padding: var(--space-1);
+  font-size: var(--text-xs);
+  background: var(--bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-transform: none;
+}
+
+.tool-queue-item-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.tool-queue-item-actions button {
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.tool-queue-error {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 .ide-chat .transcript-scroll {
   min-height: 220px;
 }
