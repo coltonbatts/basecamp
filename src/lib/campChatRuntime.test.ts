@@ -162,6 +162,30 @@ describe('runCampChatRuntime', () => {
     ]);
   });
 
+  it('throws when tools are enabled but no tool executor is provided', async () => {
+    await expect(
+      runCampChatRuntime({
+        campId: 'camp-1',
+        camp: makeCamp(true),
+        selectedArtifacts: [],
+        apiKey: 'test-key',
+        temperature: 0.3,
+        maxTokens: 200,
+        onToken: vi.fn(),
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'read_file',
+              description: 'Read file',
+              parameters: { type: 'object', properties: {}, required: [] },
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow('Tool executor is not configured.');
+  });
+
   it('throws when runtime returns empty output', async () => {
     streamMock.mockResolvedValue({
       responsePayload: { ok: true },
@@ -183,4 +207,3 @@ describe('runCampChatRuntime', () => {
     ).rejects.toThrow('Model returned an empty response.');
   });
 });
-
