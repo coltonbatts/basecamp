@@ -288,3 +288,43 @@ export type CampToggleArtifactArchivePayload = {
   artifact_id: string;
   archived: boolean;
 };
+
+// ── Agent Run State ──────────────────────────────────────────────
+
+export type RunEventKind =
+  | 'run_started'
+  | 'tool_proposed'
+  | 'tool_approved'
+  | 'tool_rejected'
+  | 'tool_executing'
+  | 'tool_result'
+  | 'run_completed'
+  | 'run_cancelled'
+  | 'run_failed';
+
+export type RunStateEvent = {
+  run_id: string;
+  event: RunEventKind;
+  timestamp_ms: number;
+  tool_name?: string;
+  tool_call_id?: string;
+  args_json?: string;
+  result_json?: string;
+  error?: string;
+  config?: Record<string, unknown>;
+};
+
+export type RunStartConfig = {
+  max_iterations?: number;
+  tool_timeout_secs?: number;
+  approval_policy?: ApprovalPolicy;
+};
+
+export type RunStartResult = {
+  run_id: string;
+  camp_id: string;
+  config: Record<string, unknown>;
+  timestamp_ms: number;
+};
+
+export type ApprovalPolicy = 'manual' | 'auto-safe' | 'full-auto';

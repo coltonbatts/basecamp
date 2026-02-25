@@ -26,6 +26,10 @@ const SETTING_WORKSPACE_PATH: &str = "workspace_path";
 const SETTING_TOOLS_ENABLED: &str = "tools_enabled";
 const SETTING_DEFAULT_MODEL: &str = "default_model";
 const SETTING_DEVELOPER_INSPECT: &str = "developer_inspect_mode";
+const SETTING_APPROVAL_POLICY: &str = "approval_policy";
+const SETTING_MAX_ITERATIONS: &str = "max_iterations";
+const CAMP_RUN_STATE_FILE: &str = "run_state.jsonl";
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 30;
 const LEGACY_CAMP_SCHEMA_VERSION: &str = "0.0";
 const CAMP_SCHEMA_VERSION: &str = "0.1";
 const CAMPS_DIR_NAME: &str = "camps";
@@ -367,6 +371,91 @@ struct InspectCampFileMeta {
     modified_at_ms: Option<i64>,
     absolute_path: String,
 }
+
+// ── Agent Run State ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RunEventKind {
+    RunStarted,
+    ToolProposed,
+    ToolApproved,
+    ToolRejected,
+    ToolExecuting,
+    ToolResult,
+    RunCompleted,
+    RunCancelled,
+    RunFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunStateEvent {
+    run_id: String,
+    event: RunEventKind,
+    timestamp_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    args_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    config: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunStartConfig {
+    #[serde(default = "default_max_iterations")]
+    max_iterations: i64,
+    #[serde(default = "default_tool_timeout")]
+    tool_timeout_secs: u64,
+    #[serde(default = "default_approval_policy_str")]
+    approval_policy: String,
+}
+
+fn default_max_iterations() -> i64 {
+    10
+}
+
+fn default_tool_timeout() -> u64 {
+    DEFAULT_TOOL_TIMEOUT_SECS
+}
+
+fn default_approval_policy_str() -> String {
+    "manual".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ApprovalPolicy {
+    Manual,
+    AutoSafe,
+    FullAuto,
+}
+
+impl ApprovalPolicy {
+    fn from_str_lenient(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "auto-safe" | "auto_safe" | "autosafe" => ApprovalPolicy::AutoSafe,
+            "full-auto" | "full_auto" | "fullauto" => ApprovalPolicy::FullAuto,
+            _ => ApprovalPolicy::Manual,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalPolicy::Manual => "manual",
+            ApprovalPolicy::AutoSafe => "auto-safe",
+            ApprovalPolicy::FullAuto => "full-auto",
+        }
+    }
+}
+
+// ── End Agent Run State ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenRouterUsage {
@@ -3879,6 +3968,206 @@ fn camp_increment_artifact_usage(
     Ok(())
 }
 
+// ── Agent Run State Commands ───────────────────────────────────────
+
+fn run_state_path(camp_dir: &Path) -> PathBuf {
+    camp_dir.join(CAMP_RUN_STATE_FILE)
+}
+
+fn append_run_state_event(camp_dir: &Path, event: &RunStateEvent) -> Result<(), String> {
+    let path = run_state_path(camp_dir);
+    let mut line =
+        serde_json::to_string(event).map_err(|e| format!("Failed to serialize run event: {e}"))?;
+    line.push('\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open run_state.jsonl: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("Failed to write run event: {e}"))?;
+    Ok(())
+}
+
+fn read_run_state_events(camp_dir: &Path, run_id: &str) -> Result<Vec<RunStateEvent>, String> {
+    let path = run_state_path(camp_dir);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let file = fs::File::open(&path).map_err(|e| format!("Failed to open run_state.jsonl: {e}"))?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("Failed to read run_state line: {e}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let event: RunStateEvent =
+            serde_json::from_str(trimmed).map_err(|e| format!("Failed to parse run event: {e}"))?;
+        if event.run_id == run_id {
+            events.push(event);
+        }
+    }
+    Ok(events)
+}
+
+#[tauri::command]
+fn run_start(
+    state: State<'_, AppState>,
+    camp_id: String,
+    config: RunStartConfig,
+) -> Result<Value, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+
+    let clamped_iterations = config.max_iterations.clamp(1, 50);
+    let clamped_timeout = config.tool_timeout_secs.max(1);
+    let policy = ApprovalPolicy::from_str_lenient(&config.approval_policy);
+
+    let run_id = Uuid::new_v4().to_string();
+    let now = now_timestamp_ms();
+
+    let config_value = serde_json::json!({
+        "max_iterations": clamped_iterations,
+        "tool_timeout_secs": clamped_timeout,
+        "approval_policy": policy.as_str(),
+    });
+
+    let event = RunStateEvent {
+        run_id: run_id.clone(),
+        event: RunEventKind::RunStarted,
+        timestamp_ms: now,
+        tool_name: None,
+        tool_call_id: None,
+        args_json: None,
+        result_json: None,
+        error: None,
+        config: Some(config_value.clone()),
+    };
+
+    append_run_state_event(&camp_dir, &event)?;
+
+    Ok(serde_json::json!({
+        "run_id": run_id,
+        "camp_id": camp_id,
+        "config": config_value,
+        "timestamp_ms": now,
+    }))
+}
+
+#[tauri::command]
+fn run_cancel(state: State<'_, AppState>, camp_id: String, run_id: String) -> Result<Value, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+
+    let event = RunStateEvent {
+        run_id: run_id.clone(),
+        event: RunEventKind::RunCancelled,
+        timestamp_ms: now_timestamp_ms(),
+        tool_name: None,
+        tool_call_id: None,
+        args_json: None,
+        result_json: None,
+        error: Some("Run cancelled by user.".to_string()),
+        config: None,
+    };
+
+    append_run_state_event(&camp_dir, &event)?;
+
+    Ok(serde_json::json!({
+        "run_id": run_id,
+        "cancelled": true,
+    }))
+}
+
+#[tauri::command]
+fn run_get_state(
+    state: State<'_, AppState>,
+    camp_id: String,
+    run_id: String,
+) -> Result<Vec<RunStateEvent>, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    read_run_state_events(&camp_dir, &run_id)
+}
+
+#[tauri::command]
+fn run_append_event(
+    state: State<'_, AppState>,
+    camp_id: String,
+    event: RunStateEvent,
+) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    append_run_state_event(&camp_dir, &event)
+}
+
+#[tauri::command]
+fn set_approval_policy(state: State<'_, AppState>, policy: String) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let validated = ApprovalPolicy::from_str_lenient(&policy);
+    set_setting_value(&connection, SETTING_APPROVAL_POLICY, validated.as_str())
+        .map_err(|e| format!("Failed to save approval policy: {e}"))
+}
+
+#[tauri::command]
+fn get_approval_policy(state: State<'_, AppState>) -> Result<String, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let value = get_setting_value(&connection, SETTING_APPROVAL_POLICY)
+        .map_err(|e| format!("Failed to read approval policy: {e}"))?;
+    Ok(value.unwrap_or_else(|| "manual".to_string()))
+}
+
+#[tauri::command]
+fn set_max_iterations(state: State<'_, AppState>, value: i64) -> Result<(), String> {
+    let clamped = value.clamp(1, 50);
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    set_setting_value(&connection, SETTING_MAX_ITERATIONS, &clamped.to_string())
+        .map_err(|e| format!("Failed to save max_iterations: {e}"))
+}
+
+#[tauri::command]
+fn get_max_iterations(state: State<'_, AppState>) -> Result<i64, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let value = get_setting_value(&connection, SETTING_MAX_ITERATIONS)
+        .map_err(|e| format!("Failed to read max_iterations: {e}"))?;
+    Ok(value
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(10)
+        .clamp(1, 50))
+}
+
+// ── End Agent Run State Commands ──────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3962,7 +4251,15 @@ pub fn run() {
             mcp::mcp_register_server,
             mcp::mcp_list_servers,
             mcp::mcp_discover_tools,
-            mcp::mcp_call_tool
+            mcp::mcp_call_tool,
+            run_start,
+            run_cancel,
+            run_get_state,
+            run_append_event,
+            set_approval_policy,
+            get_approval_policy,
+            set_max_iterations,
+            get_max_iterations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

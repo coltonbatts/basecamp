@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 import type {
+  ApprovalPolicy,
   Camp,
   CampArtifact,
   CampArtifactMetadata,
@@ -21,6 +22,9 @@ import type {
   RunInsertPayload,
   RunSearchDbArgs,
   RunSearchDbRow,
+  RunStartConfig,
+  RunStartResult,
+  RunStateEvent,
   RunUpdatePayload,
   ToolCallRow,
   ToolCallStartPayload,
@@ -301,4 +305,38 @@ export async function campListContextFiles(campId: string, path?: string): Promi
 
 export async function campWriteContextFile(campId: string, path: string, content: string): Promise<void> {
   await invoke('tauri_cmd_write_context_file', { campId, path, content });
+}
+
+// ── Agent Run State ──────────────────────────────────────────────
+
+export async function runStart(campId: string, config: RunStartConfig): Promise<RunStartResult> {
+  return invoke<RunStartResult>('run_start', { campId, config });
+}
+
+export async function runCancel(campId: string, runId: string): Promise<{ run_id: string; cancelled: boolean }> {
+  return invoke('run_cancel', { campId, runId });
+}
+
+export async function runGetState(campId: string, runId: string): Promise<RunStateEvent[]> {
+  return invoke<RunStateEvent[]>('run_get_state', { campId, runId });
+}
+
+export async function runAppendEvent(campId: string, event: RunStateEvent): Promise<void> {
+  await invoke('run_append_event', { campId, event });
+}
+
+export async function setApprovalPolicy(policy: ApprovalPolicy): Promise<void> {
+  await invoke('set_approval_policy', { policy });
+}
+
+export async function getApprovalPolicy(): Promise<ApprovalPolicy> {
+  return invoke<ApprovalPolicy>('get_approval_policy');
+}
+
+export async function setMaxIterations(value: number): Promise<void> {
+  await invoke('set_max_iterations', { value });
+}
+
+export async function getMaxIterations(): Promise<number> {
+  return invoke<number>('get_max_iterations');
 }

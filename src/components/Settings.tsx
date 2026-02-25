@@ -1,14 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
 import {
+  getApprovalPolicy,
+  getMaxIterations,
   getToolsEnabled,
   getWorkspacePath,
   hasApiKey,
   pickWorkspaceFolder,
   saveApiKey,
+  setApprovalPolicy as persistApprovalPolicy,
+  setMaxIterations as persistMaxIterations,
   setToolsEnabled as persistToolsEnabled,
   setWorkspacePath,
 } from '../lib/db';
+import type { ApprovalPolicy } from '../lib/types';
 import {
   getDeveloperInspectMode,
   setDeveloperInspectMode as persistDeveloperInspectMode,
@@ -42,6 +47,10 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
   const [workspacePath, setWorkspacePathState] = useState<string | null>(null);
   const [toolsEnabled, setToolsEnabledState] = useState(true);
   const [developerInspectMode, setDeveloperInspectModeState] = useState(false);
+  const [approvalPolicy, setApprovalPolicyState] = useState<ApprovalPolicy>('manual');
+  const [savingApprovalPolicy, setSavingApprovalPolicy] = useState(false);
+  const [maxIterations, setMaxIterationsState] = useState(10);
+  const [savingMaxIterations, setSavingMaxIterations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [keyInfo, setKeyInfo] = useState<OpenRouterKeyInfo["data"] | null>(null);
@@ -52,17 +61,21 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setLoading(true);
 
       try {
-        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode] = await Promise.all([
+        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode, currentApprovalPolicy, currentMaxIterations] = await Promise.all([
           hasApiKey(),
           getWorkspacePath(),
           getToolsEnabled(),
           getDeveloperInspectMode(),
+          getApprovalPolicy(),
+          getMaxIterations(),
         ]);
 
         setHasSavedKey(exists);
         setWorkspacePathState(currentWorkspacePath);
         setToolsEnabledState(currentToolsEnabled);
         setDeveloperInspectModeState(currentDeveloperInspectMode);
+        setApprovalPolicyState(currentApprovalPolicy as ApprovalPolicy);
+        setMaxIterationsState(currentMaxIterations);
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load settings state.');
       } finally {
@@ -168,6 +181,45 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setError(toggleError instanceof Error ? toggleError.message : 'Unable to update tools setting.');
     } finally {
       setSavingToolsEnabled(false);
+    }
+  };
+
+  const handleApprovalPolicyChange = async (policy: ApprovalPolicy) => {
+    setSavingApprovalPolicy(true);
+    setError(null);
+    setStatus(null);
+
+    const previous = approvalPolicy;
+    setApprovalPolicyState(policy);
+
+    try {
+      await persistApprovalPolicy(policy);
+      setStatus(`Approval policy set to ${policy}.`);
+    } catch (policyError) {
+      setApprovalPolicyState(previous);
+      setError(policyError instanceof Error ? policyError.message : 'Unable to update approval policy.');
+    } finally {
+      setSavingApprovalPolicy(false);
+    }
+  };
+
+  const handleMaxIterationsChange = async (value: number) => {
+    setSavingMaxIterations(true);
+    setError(null);
+    setStatus(null);
+
+    const previous = maxIterations;
+    const clamped = Math.min(Math.max(value, 1), 50);
+    setMaxIterationsState(clamped);
+
+    try {
+      await persistMaxIterations(clamped);
+      setStatus(`Max iterations set to ${clamped}.`);
+    } catch (iterError) {
+      setMaxIterationsState(previous);
+      setError(iterError instanceof Error ? iterError.message : 'Unable to update max iterations.');
+    } finally {
+      setSavingMaxIterations(false);
     }
   };
 
@@ -297,10 +349,45 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
             </button>
           </div>
 
-          <p className="settings-note">
-            Agent Mode v0 (Soul): tool calls are logged, writes are sandboxed to your workspace folder, and each run is
-            capped at 5 tool steps.
-          </p>
+          <hr className="settings-divider" />
+
+          <div className="settings-subsection">
+            <label className="field">
+              <span>Approval Policy</span>
+              <select
+                value={approvalPolicy}
+                disabled={savingApprovalPolicy}
+                onChange={(event) => {
+                  void handleApprovalPolicyChange(event.target.value as ApprovalPolicy);
+                }}
+              >
+                <option value="manual">Manual — approve every tool call</option>
+                <option value="auto-safe">Auto-safe — auto-approve read-only tools</option>
+                <option value="full-auto">Full-auto — auto-approve all tools</option>
+              </select>
+            </label>
+            <p className="settings-note">Controls whether agent tool calls require manual approval before execution.</p>
+          </div>
+
+          <div className="settings-subsection">
+            <label className="field">
+              <span>Max Iterations per Run</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={maxIterations}
+                disabled={savingMaxIterations}
+                onChange={(event) => {
+                  const parsed = parseInt(event.target.value, 10);
+                  if (!Number.isNaN(parsed)) {
+                    void handleMaxIterationsChange(parsed);
+                  }
+                }}
+              />
+            </label>
+            <p className="settings-note">Maximum tool-use loop iterations per agent run (1–50, default 10).</p>
+          </div>
         </>
       )}
 
