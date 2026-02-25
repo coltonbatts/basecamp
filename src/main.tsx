@@ -14,8 +14,18 @@ if (!window.__TAURI__) {
       if (cmd === 'camp_list') return [];
       if (cmd === 'db_list_models') return [];
       if (cmd === 'get_default_model') return null;
+      if (cmd === 'get_developer_inspect_mode') return false;
       if (cmd === 'ensure_default_workspace') return '/mock/workspace';
       if (cmd === 'workspace_list_context_files') return [];
+      if (cmd === 'inspect_stat_camp_file') {
+        return {
+          path: 'mock.txt',
+          exists: false,
+          size_bytes: null,
+          modified_at_ms: null,
+          absolute_path: '/mock/workspace/mock.txt',
+        };
+      }
       if (cmd === 'camp_load') return {
         id: 'test-camp',
         name: 'Test Camp',
@@ -26,6 +36,7 @@ if (!window.__TAURI__) {
         transcript: [],
       };
       if (cmd === 'camp_list_artifacts') return [];
+      if (cmd.startsWith('inspect_') || cmd === 'set_developer_inspect_mode') return null;
       return null;
     }
   };

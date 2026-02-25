@@ -67,6 +67,29 @@ Reference: [docs/v0.1-architecture.md](./docs/v0.1-architecture.md)
 - model search/filter (plus refresh models in-place)
 - Each new camp is created as its own local folder under `<workspace>/camps/<camp_id>/`.
 
+## Debugging + Inspect Mode
+
+Developer Inspect Mode is local-only and disabled by default.
+
+1. Open `Settings`.
+2. Enable `Developer Mode (Inspect)`.
+3. Open a camp chat and expand the `Inspect` panel.
+
+When enabled, Basecamp writes per-turn debug artifacts in each camp:
+
+```text
+<workspace>/camps/<camp_id>/.camp/debug/
+  events.jsonl
+  turn_<correlation_id>_request.json
+  turn_<correlation_id>_response.json
+  turn_<correlation_id>_bundle.json
+```
+
+Notes:
+- Redaction is applied before writing debug files (`api_key`, auth/token/secret fields, and sensitive headers).
+- Inspect logging does not change normal camp storage files (`camp.json`, `transcript.jsonl`, etc.).
+- Use `Export Turn Bundle` in the Inspect panel to regenerate a deterministic per-turn JSON bundle for sharing or diffing.
+
 ## Run
 
 ```bash

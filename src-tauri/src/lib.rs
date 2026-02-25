@@ -14,12 +14,15 @@ use tauri::{App, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
+mod inspect;
+
 const KEYRING_SERVICE: &str = "com.basecamp.app";
 const KEYRING_ACCOUNT: &str = "openrouter_api_key";
 const DB_FILE_NAME: &str = "basecamp.db";
 const SETTING_WORKSPACE_PATH: &str = "workspace_path";
 const SETTING_TOOLS_ENABLED: &str = "tools_enabled";
 const SETTING_DEFAULT_MODEL: &str = "default_model";
+const SETTING_DEVELOPER_INSPECT: &str = "developer_inspect_mode";
 const LEGACY_CAMP_SCHEMA_VERSION: &str = "0.0";
 const CAMP_SCHEMA_VERSION: &str = "0.1";
 const CAMPS_DIR_NAME: &str = "camps";
@@ -326,6 +329,39 @@ struct CampToggleArtifactArchivePayload {
     camp_id: String,
     artifact_id: String,
     archived: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectEmitEventPayload {
+    camp_id: String,
+    correlation_id: String,
+    event_type: String,
+    timestamp_ms: Option<i64>,
+    duration_ms: Option<i64>,
+    summary: String,
+    payload: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectWriteTurnPayload {
+    camp_id: String,
+    correlation_id: String,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectCampFileMetaPayload {
+    camp_id: String,
+    relative_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectCampFileMeta {
+    path: String,
+    exists: bool,
+    size_bytes: Option<u64>,
+    modified_at_ms: Option<i64>,
+    absolute_path: String,
 }
 
 fn map_model_row(row: &Row<'_>) -> rusqlite::Result<ModelRow> {
@@ -761,6 +797,31 @@ fn validate_context_relative_path(
     Ok(relative)
 }
 
+fn validate_camp_relative_path(path: &str, field_name: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field_name} is required."));
+    }
+
+    let relative = PathBuf::from(trimmed);
+    if relative.is_absolute() {
+        return Err(format!("{field_name} must be a relative path."));
+    }
+
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(format!(
+                    "{field_name} must not contain traversal segments or absolute path markers."
+                ))
+            }
+        }
+    }
+
+    Ok(relative)
+}
+
 fn canonicalize_context_root(context_dir: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(context_dir)
         .map_err(|err| format!("Unable to resolve camp context directory: {err}"))
@@ -826,8 +887,8 @@ fn list_context_files_recursive(
     current_dir: &Path,
     entries: &mut Vec<String>,
 ) -> Result<(), String> {
-    for entry_result in
-        fs::read_dir(current_dir).map_err(|err| format!("Unable to list context directory: {err}"))?
+    for entry_result in fs::read_dir(current_dir)
+        .map_err(|err| format!("Unable to list context directory: {err}"))?
     {
         let entry = entry_result.map_err(|err| format!("Unable to read context entry: {err}"))?;
         let entry_path = entry.path();
@@ -856,13 +917,14 @@ fn prune_empty_context_parents(context_root: &Path, start_dir: &Path) -> Result<
             break;
         }
 
-        let mut entries =
-            fs::read_dir(&current).map_err(|err| format!("Unable to inspect context directory: {err}"))?;
+        let mut entries = fs::read_dir(&current)
+            .map_err(|err| format!("Unable to inspect context directory: {err}"))?;
         if entries.next().is_some() {
             break;
         }
 
-        fs::remove_dir(&current).map_err(|err| format!("Unable to remove context directory: {err}"))?;
+        fs::remove_dir(&current)
+            .map_err(|err| format!("Unable to remove context directory: {err}"))?;
 
         let Some(parent) = current.parent() else {
             break;
@@ -2271,6 +2333,185 @@ fn get_default_model(state: State<'_, AppState>) -> Result<Option<String>, Strin
         .map_err(|err| format!("Unable to load default model setting: {err}"))
 }
 
+fn parse_setting_bool(value: Option<String>, default_value: bool) -> bool {
+    match value.as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        Some(raw) if raw.eq_ignore_ascii_case("true") => true,
+        Some(raw) if raw.eq_ignore_ascii_case("false") => false,
+        Some(_) => default_value,
+        None => default_value,
+    }
+}
+
+fn get_developer_inspect_mode_db(connection: &Connection) -> Result<bool, String> {
+    let value = get_setting_value(connection, SETTING_DEVELOPER_INSPECT)
+        .map_err(|err| format!("Unable to load developer inspect setting: {err}"))?;
+    Ok(parse_setting_bool(value, false))
+}
+
+#[tauri::command]
+fn set_developer_inspect_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    let value = if enabled { "1" } else { "0" };
+    set_setting_value(&connection, SETTING_DEVELOPER_INSPECT, value)
+        .map_err(|err| format!("Unable to save developer inspect setting: {err}"))
+}
+
+#[tauri::command]
+fn get_developer_inspect_mode(state: State<'_, AppState>) -> Result<bool, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    get_developer_inspect_mode_db(&connection)
+}
+
+fn resolve_camp_dir_for_inspect(connection: &Connection, camp_id: &str) -> Result<PathBuf, String> {
+    let camps_root = ensure_camps_root(connection)?;
+    resolve_existing_camp_dir(&camps_root, camp_id)
+}
+
+#[tauri::command]
+fn inspect_emit_event(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    payload: InspectEmitEventPayload,
+) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    if !get_developer_inspect_mode_db(&connection)? {
+        return Ok(());
+    }
+
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &payload.camp_id)?;
+    let event = inspect::InspectEventRecord {
+        timestamp_ms: payload.timestamp_ms.unwrap_or_else(now_timestamp_ms),
+        correlation_id: payload.correlation_id,
+        event_type: payload.event_type,
+        duration_ms: payload.duration_ms,
+        summary: payload.summary,
+        payload: payload.payload,
+    };
+
+    inspect::emit_event(Some(&app), &camp_dir, event)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn inspect_write_turn_request(
+    state: State<'_, AppState>,
+    payload: InspectWriteTurnPayload,
+) -> Result<String, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    if !get_developer_inspect_mode_db(&connection)? {
+        return Ok(String::new());
+    }
+
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &payload.camp_id)?;
+    let path =
+        inspect::write_turn_request_file(&camp_dir, &payload.correlation_id, &payload.payload)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn inspect_write_turn_response(
+    state: State<'_, AppState>,
+    payload: InspectWriteTurnPayload,
+) -> Result<String, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    if !get_developer_inspect_mode_db(&connection)? {
+        return Ok(String::new());
+    }
+
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &payload.camp_id)?;
+    let path =
+        inspect::write_turn_response_file(&camp_dir, &payload.correlation_id, &payload.payload)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn inspect_write_turn_bundle(
+    state: State<'_, AppState>,
+    payload: InspectWriteTurnPayload,
+) -> Result<String, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    if !get_developer_inspect_mode_db(&connection)? {
+        return Ok(String::new());
+    }
+
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &payload.camp_id)?;
+    let path =
+        inspect::write_turn_bundle_file(&camp_dir, &payload.correlation_id, &payload.payload)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn inspect_read_turn_bundle(
+    state: State<'_, AppState>,
+    camp_id: String,
+    correlation_id: String,
+) -> Result<Value, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    if !get_developer_inspect_mode_db(&connection)? {
+        return Ok(Value::Null);
+    }
+
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &camp_id)?;
+    let path = inspect::turn_bundle_file_path(&camp_dir, &correlation_id);
+    if !path.exists() {
+        return Ok(Value::Null);
+    }
+
+    read_json_file(&path)
+}
+
+#[tauri::command]
+fn inspect_stat_camp_file(
+    state: State<'_, AppState>,
+    payload: InspectCampFileMetaPayload,
+) -> Result<InspectCampFileMeta, String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camp_dir = resolve_camp_dir_for_inspect(&connection, &payload.camp_id)?;
+    let relative = validate_camp_relative_path(&payload.relative_path, "relative_path")?;
+    let target = camp_dir.join(&relative);
+    let meta = inspect::collect_file_meta(&target);
+
+    Ok(InspectCampFileMeta {
+        path: relative.to_string_lossy().replace('\\', "/"),
+        exists: meta.exists,
+        size_bytes: meta.size_bytes,
+        modified_at_ms: meta.modified_at_ms,
+        absolute_path: meta.absolute_path,
+    })
+}
+
 #[tauri::command]
 fn insert_tool_call_start(
     state: State<'_, AppState>,
@@ -3082,7 +3323,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 // Keep the splash screen open for a bit
                 std::thread::sleep(Duration::from_millis(2500));
-                
+
                 // Then show the main app
                 splash_window.close().unwrap();
                 main_window.show().unwrap();
@@ -3110,6 +3351,14 @@ pub fn run() {
             get_tools_enabled,
             set_default_model,
             get_default_model,
+            set_developer_inspect_mode,
+            get_developer_inspect_mode,
+            inspect_emit_event,
+            inspect_write_turn_request,
+            inspect_write_turn_response,
+            inspect_write_turn_bundle,
+            inspect_read_turn_bundle,
+            inspect_stat_camp_file,
             insert_tool_call_start,
             update_tool_call_result,
             update_tool_call_error,

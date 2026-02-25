@@ -161,11 +161,72 @@ export type OpenRouterToolLoopOptions = {
   max_tokens: number;
   executeToolCall: (input: OpenRouterToolLoopExecutionInput) => Promise<string>;
   maxIterations?: number;
+  correlationId?: string;
+  telemetry?: OpenRouterTelemetryHooks;
 };
 
 export type OpenRouterToolLoopResult = OpenRouterRunResult & {
   transcriptMessages: OpenRouterChatMessage[];
   requestPayloads: OpenRouterChatRequestPayload[];
+};
+
+export type OpenRouterHttpRequestStartEvent = {
+  timestamp_ms: number;
+  request_payload: OpenRouterChatRequestPayload;
+  message_count: number;
+  stream: boolean;
+};
+
+export type OpenRouterHttpRequestEndEvent = {
+  timestamp_ms: number;
+  duration_ms: number;
+  status: number;
+  response_headers: Record<string, string>;
+  request_payload: OpenRouterChatRequestPayload;
+  response_payload: unknown;
+  stream: boolean;
+  stream_chunk_count?: number;
+};
+
+export type OpenRouterHttpRequestErrorEvent = {
+  timestamp_ms: number;
+  duration_ms: number;
+  status?: number;
+  error_message: string;
+  request_payload: OpenRouterChatRequestPayload;
+  response_payload: unknown;
+  stream: boolean;
+  stack?: string;
+};
+
+export type OpenRouterToolCallStartEvent = {
+  timestamp_ms: number;
+  tool_call_id: string;
+  tool_name: string;
+  arguments_json: string;
+};
+
+export type OpenRouterToolCallEndEvent = {
+  timestamp_ms: number;
+  duration_ms: number;
+  tool_call_id: string;
+  tool_name: string;
+  success: boolean;
+  result: string;
+};
+
+export type OpenRouterTelemetryHooks = {
+  onHttpRequestStart?: (event: OpenRouterHttpRequestStartEvent) => void;
+  onHttpRequestEnd?: (event: OpenRouterHttpRequestEndEvent) => void;
+  onHttpRequestError?: (event: OpenRouterHttpRequestErrorEvent) => void;
+  onStreamChunk?: (chunkCount: number) => void;
+  onToolCallStart?: (event: OpenRouterToolCallStartEvent) => void;
+  onToolCallEnd?: (event: OpenRouterToolCallEndEvent) => void;
+};
+
+type OpenRouterRequestOptions = {
+  correlationId?: string;
+  telemetry?: OpenRouterTelemetryHooks;
 };
 
 export class OpenRouterRequestError extends Error {
@@ -276,6 +337,62 @@ function parseToolCalls(rawToolCalls: unknown): OpenRouterToolCall[] {
   return parsed;
 }
 
+function callTelemetry(fn: (() => void) | undefined): void {
+  if (!fn) {
+    return;
+  }
+
+  try {
+    fn();
+  } catch {
+    // Telemetry should never change runtime behavior.
+  }
+}
+
+function pickSafeResponseHeaders(response: Response): Record<string, string> {
+  const blocked = new Set(['set-cookie', 'cookie', 'authorization', 'proxy-authorization']);
+  const safe: Record<string, string> = {};
+  const headersValue = response.headers as Headers | undefined;
+
+  if (!headersValue || typeof headersValue.entries !== 'function') {
+    return safe;
+  }
+
+  for (const [key, value] of headersValue.entries()) {
+    if (blocked.has(key.toLowerCase())) {
+      continue;
+    }
+
+    safe[key] = value;
+  }
+
+  return safe;
+}
+
+function buildOpenRouterHeaders(apiKey: string, correlationId?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'http://localhost',
+    'X-Title': 'Basecamp',
+  };
+
+  if (correlationId) {
+    headers['X-Basecamp-Correlation-Id'] = correlationId;
+  }
+
+  return headers;
+}
+
+function isToolResultSuccess(result: string): boolean {
+  try {
+    const parsed = JSON.parse(result) as { error?: unknown };
+    return typeof parsed !== 'object' || parsed === null || parsed.error === undefined;
+  } catch {
+    return true;
+  }
+}
+
 export function buildOpenRouterPayload(values: RunFormValues): OpenRouterRequestPayload {
   const messages: OpenRouterRequestPayload['messages'] = [];
 
@@ -296,19 +413,42 @@ export function buildOpenRouterPayload(values: RunFormValues): OpenRouterRequest
 export async function runOpenRouterChatCompletion(
   apiKey: string,
   requestPayload: OpenRouterChatRequestPayload,
+  options?: OpenRouterRequestOptions,
 ): Promise<OpenRouterChatRunResult> {
   const validatedRequestPayload = OpenRouterChatRequestSchema.parse(requestPayload) as OpenRouterChatRequestPayload;
+  const startedAt = Date.now();
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'http://localhost',
-      'X-Title': 'Basecamp',
-    },
-    body: JSON.stringify(validatedRequestPayload),
+  callTelemetry(() => {
+    options?.telemetry?.onHttpRequestStart?.({
+      timestamp_ms: startedAt,
+      request_payload: validatedRequestPayload,
+      message_count: validatedRequestPayload.messages.length,
+      stream: false,
+    });
   });
+
+  let response: Response;
+  try {
+    response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: buildOpenRouterHeaders(apiKey, options?.correlationId),
+      body: JSON.stringify(validatedRequestPayload),
+    });
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        error_message: error instanceof Error ? error.message : 'OpenRouter network request failed.',
+        request_payload: validatedRequestPayload,
+        response_payload: null,
+        stream: false,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    });
+    throw error;
+  }
 
   let responsePayload: unknown = null;
 
@@ -317,6 +457,9 @@ export async function runOpenRouterChatCompletion(
   } catch {
     responsePayload = null;
   }
+
+  const durationMs = Date.now() - startedAt;
+  const safeHeaders = pickSafeResponseHeaders(response);
 
   if (!response.ok) {
     const responseMessage =
@@ -327,13 +470,48 @@ export async function runOpenRouterChatCompletion(
         ? (responsePayload as { error: { message: string } }).error.message
         : `OpenRouter request failed with status ${response.status}`;
 
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        status: response.status,
+        error_message: responseMessage,
+        request_payload: validatedRequestPayload,
+        response_payload: responsePayload,
+        stream: false,
+      });
+    });
+
     throw new OpenRouterRequestError(responseMessage, validatedRequestPayload, responsePayload);
   }
 
   const parsed = OpenRouterResponseSchema.safeParse(responsePayload);
   if (!parsed.success) {
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        status: response.status,
+        error_message: 'OpenRouter response validation failed.',
+        request_payload: validatedRequestPayload,
+        response_payload: responsePayload,
+        stream: false,
+      });
+    });
     throw new OpenRouterRequestError('OpenRouter response validation failed.', validatedRequestPayload, responsePayload);
   }
+
+  callTelemetry(() => {
+    options?.telemetry?.onHttpRequestEnd?.({
+      timestamp_ms: Date.now(),
+      duration_ms: durationMs,
+      status: response.status,
+      response_headers: safeHeaders,
+      request_payload: validatedRequestPayload,
+      response_payload: responsePayload,
+      stream: false,
+    });
+  });
 
   const message = parsed.data.choices[0].message;
   const toolCalls = parseToolCalls(message.tool_calls);
@@ -354,8 +532,9 @@ export async function runOpenRouterChatCompletion(
 export async function runOpenRouterCompletion(
   apiKey: string,
   requestPayload: OpenRouterRequestPayload,
+  options?: OpenRouterRequestOptions,
 ): Promise<OpenRouterRunResult> {
-  const completion = await runOpenRouterChatCompletion(apiKey, requestPayload);
+  const completion = await runOpenRouterChatCompletion(apiKey, requestPayload, options);
 
   return {
     responsePayload: completion.responsePayload,
@@ -398,7 +577,10 @@ export async function runToolUseLoop(
     };
     requestPayloads.push(requestPayload);
 
-    const completion = await runOpenRouterChatCompletion(apiKey, requestPayload);
+    const completion = await runOpenRouterChatCompletion(apiKey, requestPayload, {
+      correlationId: options.correlationId,
+      telemetry: options.telemetry,
+    });
     responsePayload = completion.responsePayload;
     usage = completion.usage;
     resolvedModel = completion.resolvedModel ?? resolvedModel;
@@ -436,10 +618,32 @@ export async function runToolUseLoop(
     }
 
     for (const toolCall of normalizedToolCalls) {
+      const toolStartedAt = Date.now();
+      callTelemetry(() => {
+        options.telemetry?.onToolCallStart?.({
+          timestamp_ms: toolStartedAt,
+          tool_call_id: toolCall.id,
+          tool_name: toolCall.function.name,
+          arguments_json: toolCall.function.arguments ?? '{}',
+        });
+      });
+
       const toolResult = await options.executeToolCall({
         campId,
         toolCall,
       });
+
+      callTelemetry(() => {
+        options.telemetry?.onToolCallEnd?.({
+          timestamp_ms: Date.now(),
+          duration_ms: Date.now() - toolStartedAt,
+          tool_call_id: toolCall.id,
+          tool_name: toolCall.function.name,
+          success: isToolResultSuccess(toolResult),
+          result: toolResult,
+        });
+      });
+
       const toolMessage: OpenRouterChatMessage = {
         role: 'tool',
         tool_call_id: toolCall.id,
@@ -472,23 +676,46 @@ export async function streamOpenRouterChatCompletion(
   apiKey: string,
   requestPayload: OpenRouterChatRequestPayload,
   onToken: (token: string) => void,
+  options?: OpenRouterRequestOptions,
 ): Promise<OpenRouterRunResult> {
   const validatedRequestPayload = OpenRouterChatRequestSchema.parse(requestPayload) as OpenRouterChatRequestPayload;
   const streamRequestPayload: OpenRouterChatRequestPayload = {
     ...validatedRequestPayload,
     stream: true,
   };
+  const startedAt = Date.now();
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'http://localhost',
-      'X-Title': 'Basecamp',
-    },
-    body: JSON.stringify(streamRequestPayload),
+  callTelemetry(() => {
+    options?.telemetry?.onHttpRequestStart?.({
+      timestamp_ms: startedAt,
+      request_payload: streamRequestPayload,
+      message_count: streamRequestPayload.messages.length,
+      stream: true,
+    });
   });
+
+  let response: Response;
+  try {
+    response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: buildOpenRouterHeaders(apiKey, options?.correlationId),
+      body: JSON.stringify(streamRequestPayload),
+    });
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        error_message: error instanceof Error ? error.message : 'OpenRouter network request failed.',
+        request_payload: streamRequestPayload,
+        response_payload: null,
+        stream: true,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    });
+    throw error;
+  }
 
   if (!response.ok) {
     let responsePayload: unknown = null;
@@ -498,14 +725,40 @@ export async function streamOpenRouterChatCompletion(
       responsePayload = null;
     }
 
+    const durationMs = Date.now() - startedAt;
+    const errorMessage = parseOpenRouterErrorMessage(response.status, responsePayload);
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        status: response.status,
+        error_message: errorMessage,
+        request_payload: streamRequestPayload,
+        response_payload: responsePayload,
+        stream: true,
+      });
+    });
+
     throw new OpenRouterRequestError(
-      parseOpenRouterErrorMessage(response.status, responsePayload),
+      errorMessage,
       streamRequestPayload,
       responsePayload,
     );
   }
 
   if (!response.body) {
+    const durationMs = Date.now() - startedAt;
+    callTelemetry(() => {
+      options?.telemetry?.onHttpRequestError?.({
+        timestamp_ms: Date.now(),
+        duration_ms: durationMs,
+        status: response.status,
+        error_message: 'OpenRouter response stream is not available.',
+        request_payload: streamRequestPayload,
+        response_payload: null,
+        stream: true,
+      });
+    });
     throw new OpenRouterRequestError('OpenRouter response stream is not available.', streamRequestPayload, null);
   }
 
@@ -544,6 +797,9 @@ export async function streamOpenRouterChatCompletion(
       }
 
       chunksProcessed += 1;
+      callTelemetry(() => {
+        options?.telemetry?.onStreamChunk?.(chunksProcessed);
+      });
 
       if (typeof parsedChunk === 'object' && parsedChunk !== null) {
         const maybeModel = (parsedChunk as { model?: unknown }).model;
@@ -599,8 +855,28 @@ export async function streamOpenRouterChatCompletion(
     processSseChunk(buffer);
   }
 
+  const streamResponsePayload = {
+    chunks_processed: chunksProcessed,
+    output_text: outputText,
+    usage,
+    resolved_model: resolvedModel,
+  };
+
+  callTelemetry(() => {
+    options?.telemetry?.onHttpRequestEnd?.({
+      timestamp_ms: Date.now(),
+      duration_ms: Date.now() - startedAt,
+      status: response.status,
+      response_headers: pickSafeResponseHeaders(response),
+      request_payload: streamRequestPayload,
+      response_payload: streamResponsePayload,
+      stream: true,
+      stream_chunk_count: chunksProcessed,
+    });
+  });
+
   return {
-    responsePayload: { chunks_processed: chunksProcessed },
+    responsePayload: streamResponsePayload,
     outputText,
     usage,
     resolvedModel,

@@ -1,9 +1,10 @@
-import { composeCampOpenRouterRequest } from './campRequest';
+import { composeCampOpenRouterRequestWithBreakdown, type ComposedInputBreakdown } from './campRequest';
 import {
   runToolUseLoop,
   streamOpenRouterChatCompletion,
   type OpenRouterChatMessage,
   type OpenRouterChatRequestPayload,
+  type OpenRouterTelemetryHooks,
   type OpenRouterToolLoopExecutionInput,
   type OpenRouterToolSpec,
 } from './openrouter';
@@ -21,6 +22,13 @@ export type RunCampChatRuntimeInput = {
   onToken: (token: string) => void;
   tools?: OpenRouterToolSpec[];
   executeToolCall?: (input: OpenRouterToolLoopExecutionInput) => Promise<string>;
+  correlationId?: string;
+  telemetry?: OpenRouterTelemetryHooks;
+  onComposeStart?: () => void;
+  onComposeEnd?: (event: {
+    requestPayload: OpenRouterChatRequestPayload;
+    breakdown: ComposedInputBreakdown;
+  }) => void;
 };
 
 export type RunCampChatRuntimeResult = {
@@ -31,6 +39,7 @@ export type RunCampChatRuntimeResult = {
   usingTools: boolean;
   usage?: TokenUsage;
   resolvedModel: string | null;
+  composedInputBreakdown: ComposedInputBreakdown;
 };
 
 function messageContentToString(content: OpenRouterChatMessage['content']): string {
@@ -123,13 +132,19 @@ function assertNonEmptyOutput(outputText: string): void {
 
 export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promise<RunCampChatRuntimeResult> {
   const tools = input.camp.config.tools_enabled ? input.tools : undefined;
-  const requestPayload = composeCampOpenRouterRequest({
+  input.onComposeStart?.();
+  const composed = composeCampOpenRouterRequestWithBreakdown({
     camp: input.camp,
     selectedArtifacts: input.selectedArtifacts,
     userMessage: '',
     temperature: input.temperature,
     maxTokens: input.maxTokens,
     tools,
+  });
+  const requestPayload = composed.payload;
+  input.onComposeEnd?.({
+    requestPayload,
+    breakdown: composed.breakdown,
   });
 
   if (tools && !input.executeToolCall) {
@@ -148,6 +163,8 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
         temperature: requestPayload.temperature,
         max_tokens: requestPayload.max_tokens,
         executeToolCall: input.executeToolCall,
+        correlationId: input.correlationId,
+        telemetry: input.telemetry,
       },
     );
 
@@ -161,10 +178,14 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
       usingTools: true,
       usage: looped.usage,
       resolvedModel: looped.resolvedModel,
+      composedInputBreakdown: composed.breakdown,
     };
   }
 
-  const streamed = await streamOpenRouterChatCompletion(input.apiKey, requestPayload, input.onToken);
+  const streamed = await streamOpenRouterChatCompletion(input.apiKey, requestPayload, input.onToken, {
+    correlationId: input.correlationId,
+    telemetry: input.telemetry,
+  });
   assertNonEmptyOutput(streamed.outputText);
 
   return {
@@ -180,5 +201,6 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
     usingTools: false,
     usage: streamed.usage,
     resolvedModel: streamed.resolvedModel,
+    composedInputBreakdown: composed.breakdown,
   };
 }

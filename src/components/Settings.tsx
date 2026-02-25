@@ -10,6 +10,10 @@ import {
   setToolsEnabled as persistToolsEnabled,
   setWorkspacePath,
 } from '../lib/db';
+import {
+  getDeveloperInspectMode,
+  setDeveloperInspectMode as persistDeveloperInspectMode,
+} from '../lib/inspect';
 import { fetchOpenRouterKeyInfo, type OpenRouterKeyInfo } from '../lib/openrouter';
 import { syncModelsToDb } from '../lib/models';
 
@@ -34,9 +38,11 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
   const [syncing, setSyncing] = useState(false);
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [savingToolsEnabled, setSavingToolsEnabled] = useState(false);
+  const [savingDeveloperInspect, setSavingDeveloperInspect] = useState(false);
   const [hasSavedKey, setHasSavedKey] = useState(false);
   const [workspacePath, setWorkspacePathState] = useState<string | null>(null);
   const [toolsEnabled, setToolsEnabledState] = useState(true);
+  const [developerInspectMode, setDeveloperInspectModeState] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [keyInfo, setKeyInfo] = useState<OpenRouterKeyInfo["data"] | null>(null);
@@ -47,15 +53,17 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setLoading(true);
 
       try {
-        const [exists, currentWorkspacePath, currentToolsEnabled] = await Promise.all([
+        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode] = await Promise.all([
           hasApiKey(),
           getWorkspacePath(),
           getToolsEnabled(),
+          getDeveloperInspectMode(),
         ]);
 
         setHasSavedKey(exists);
         setWorkspacePathState(currentWorkspacePath);
         setToolsEnabledState(currentToolsEnabled);
+        setDeveloperInspectModeState(currentDeveloperInspectMode);
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load settings state.');
       } finally {
@@ -174,6 +182,25 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
     }
   };
 
+  const handleDeveloperInspectToggle = async (enabled: boolean) => {
+    setSavingDeveloperInspect(true);
+    setError(null);
+    setStatus(null);
+
+    const previous = developerInspectMode;
+    setDeveloperInspectModeState(enabled);
+
+    try {
+      await persistDeveloperInspectMode(enabled);
+      setStatus(`Developer inspect mode ${enabled ? 'enabled' : 'disabled'}.`);
+    } catch (toggleError) {
+      setDeveloperInspectModeState(previous);
+      setError(toggleError instanceof Error ? toggleError.message : 'Unable to update developer inspect mode.');
+    } finally {
+      setSavingDeveloperInspect(false);
+    }
+  };
+
   return (
     <section className="panel settings-panel">
       <h2>Settings</h2>
@@ -255,6 +282,23 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
               <span>Tools enabled</span>
             </label>
             <p className="settings-note">When disabled, Basecamp runs standard chat completions without tool calls.</p>
+          </div>
+
+          <div className="settings-subsection">
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={developerInspectMode}
+                disabled={savingDeveloperInspect}
+                onChange={(event) => {
+                  void handleDeveloperInspectToggle(event.target.checked);
+                }}
+              />
+              <span>Developer Mode (Inspect)</span>
+            </label>
+            <p className="settings-note">
+              Writes local debug logs to each camp at <code>.camp/debug/</code> and enables the chat Inspect panel.
+            </p>
           </div>
 
           <div className="settings-subsection">

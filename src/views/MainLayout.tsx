@@ -3,6 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import '../App.css';
+import { InspectPanel, type InspectFileWrite, type InspectTurnData } from '../components/InspectPanel';
 import { TranscriptView } from '../components/TranscriptView';
 import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
 import {
@@ -29,6 +30,18 @@ import {
   setWorkspacePath,
 } from '../lib/db';
 import { runCampChatRuntime } from '../lib/campChatRuntime';
+import {
+  getDeveloperInspectMode,
+  inspectEmitEvent,
+  inspectStatCampFile,
+  inspectWriteTurnBundle,
+  inspectWriteTurnRequest,
+  inspectWriteTurnResponse,
+  listenInspectEvents,
+  type InspectCampFileMeta,
+  type InspectEmitEventPayload,
+  type InspectEventRecord,
+} from '../lib/inspect';
 import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
 import { CAMP_TOOLS, executeCampToolCall, getToolKind } from '../lib/tools';
@@ -38,6 +51,29 @@ const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_TEMPERATURE = 0.3;
 const TOOL_REJECT_MESSAGE = 'Tool call rejected by user.';
+
+type InspectFileWriteMapEntry = {
+  path: string;
+  before: InspectCampFileMeta | null;
+  after: InspectCampFileMeta | null;
+};
+
+type ActiveInspectTurn = InspectTurnData & {
+  requestPayload: {
+    requests: unknown[];
+  } | null;
+  responsePayload: {
+    responses: unknown[];
+  } | null;
+};
+
+function buildCorrelationId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `corr-${Date.now()}`;
+}
 
 function modelDisplayLabel(model: ModelRow): string {
   const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
@@ -185,8 +221,15 @@ export function MainLayout() {
   const [isLoadingContextFile, setIsLoadingContextFile] = useState(false);
   const [collapsedContextDirs, setCollapsedContextDirs] = useState<string[]>([]);
   const [toolApprovalQueue, setToolApprovalQueue] = useState<ToolApprovalItem[]>([]);
+  const [developerInspectMode, setDeveloperInspectMode] = useState(false);
+  const [inspectTurn, setInspectTurn] = useState<ActiveInspectTurn | null>(null);
+  const [inspectExporting, setInspectExporting] = useState(false);
+  const [inspectExportError, setInspectExportError] = useState<string | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const toolApprovalResolversRef = useRef(new Map<string, (decision: ToolApprovalDecision) => void>());
+  const activeCorrelationIdRef = useRef<string | null>(null);
+  const inspectFileWritesRef = useRef<Map<string, InspectFileWriteMapEntry>>(new Map());
+  const inspectTimelineRef = useRef<InspectEventRecord[]>([]);
 
   const modelOptions = useMemo(() => (models.length > 0 ? models.map((model) => model.id) : [FALLBACK_MODEL]), [models]);
   const modelOptionsWithLabels = useMemo(() => (models.length > 0 ? models.map((model) => ({ id: model.id, label: modelDisplayLabel(model) })) : [{ id: FALLBACK_MODEL, label: FALLBACK_MODEL }]), [models]);
@@ -290,6 +333,216 @@ export function MainLayout() {
 
     void boot();
   }, [loadCamps, loadModels]);
+
+  useEffect(() => {
+    void getDeveloperInspectMode()
+      .then((enabled) => {
+        setDeveloperInspectMode(enabled);
+      })
+      .catch(() => {
+        setDeveloperInspectMode(false);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!developerInspectMode) {
+      return;
+    }
+
+    let isDisposed = false;
+    let dispose: (() => void) | null = null;
+
+    void listenInspectEvents((event) => {
+      if (isDisposed) {
+        return;
+      }
+
+      if (!activeCorrelationIdRef.current || event.correlation_id !== activeCorrelationIdRef.current) {
+        return;
+      }
+
+      inspectTimelineRef.current = [...inspectTimelineRef.current, event];
+
+      setInspectTurn((previous) => {
+        if (!previous || previous.correlationId !== event.correlation_id) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          events: [...previous.events, event],
+        };
+      });
+    }).then((unlisten) => {
+      if (isDisposed) {
+        unlisten();
+        return;
+      }
+      dispose = unlisten;
+    });
+
+    return () => {
+      isDisposed = true;
+      if (dispose) {
+        dispose();
+      }
+    };
+  }, [developerInspectMode]);
+
+  const emitInspectEventForTurn = useCallback(
+    async (
+      campId: string,
+      correlationId: string,
+      event: Omit<InspectEmitEventPayload, 'camp_id' | 'correlation_id'>,
+    ) => {
+      if (!developerInspectMode) {
+        return;
+      }
+
+      try {
+        await inspectEmitEvent({
+          camp_id: campId,
+          correlation_id: correlationId,
+          ...event,
+        });
+      } catch {
+        // Ignore inspect telemetry failures so runtime behavior is unchanged.
+      }
+    },
+    [developerInspectMode],
+  );
+
+  const emitInspectEventForActiveTurn = useCallback(
+    async (campId: string, event: Omit<InspectEmitEventPayload, 'camp_id' | 'correlation_id'>) => {
+      const correlationId = activeCorrelationIdRef.current;
+      if (!correlationId) {
+        return;
+      }
+
+      await emitInspectEventForTurn(campId, correlationId, event);
+    },
+    [emitInspectEventForTurn],
+  );
+
+  const captureCampFileMeta = useCallback(
+    async (campId: string, relativePath: string): Promise<InspectCampFileMeta | null> => {
+      if (!developerInspectMode) {
+        return null;
+      }
+
+      try {
+        return await inspectStatCampFile(campId, relativePath);
+      } catch {
+        return null;
+      }
+    },
+    [developerInspectMode],
+  );
+
+  const commitFileWritesToInspectTurn = useCallback(() => {
+    const sortedWrites: InspectFileWrite[] = [...inspectFileWritesRef.current.values()]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((entry) => ({
+        path: entry.path,
+        before: entry.before,
+        after: entry.after,
+      }));
+
+    setInspectTurn((previous) => {
+      if (!previous) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        filesWritten: sortedWrites,
+      };
+    });
+  }, []);
+
+  const recordFileWritesForTurn = useCallback(
+    async <T,>(
+      campId: string,
+      relativePaths: string[],
+      operation: () => Promise<T>,
+      summary: string,
+    ): Promise<T> => {
+      const correlationId = activeCorrelationIdRef.current;
+      if (!developerInspectMode || !correlationId) {
+        return operation();
+      }
+
+      const startedAt = Date.now();
+      const normalizedPaths = [...new Set(relativePaths)].sort((left, right) => left.localeCompare(right));
+      const beforeByPath = new Map<string, InspectCampFileMeta | null>();
+      await Promise.all(
+        normalizedPaths.map(async (path) => {
+          beforeByPath.set(path, await captureCampFileMeta(campId, path));
+        }),
+      );
+
+      await emitInspectEventForTurn(campId, correlationId, {
+        event_type: 'persist_start',
+        summary,
+        payload: {
+          paths: normalizedPaths,
+        },
+      });
+
+      try {
+        const result = await operation();
+        const afterByPath = new Map<string, InspectCampFileMeta | null>();
+        await Promise.all(
+          normalizedPaths.map(async (path) => {
+            afterByPath.set(path, await captureCampFileMeta(campId, path));
+          }),
+        );
+
+        for (const path of normalizedPaths) {
+          inspectFileWritesRef.current.set(path, {
+            path,
+            before: beforeByPath.get(path) ?? null,
+            after: afterByPath.get(path) ?? null,
+          });
+        }
+        commitFileWritesToInspectTurn();
+
+        await emitInspectEventForTurn(campId, correlationId, {
+          event_type: 'persist_end',
+          duration_ms: Date.now() - startedAt,
+          summary: `${summary} complete`,
+          payload: {
+            paths: normalizedPaths,
+          },
+        });
+
+        return result;
+      } catch (error) {
+        await emitInspectEventForTurn(campId, correlationId, {
+          event_type: 'error',
+          summary: `${summary} failed`,
+          payload: {
+            paths: normalizedPaths,
+            error: error instanceof Error ? error.message : 'Unknown persistence error.',
+            stack: error instanceof Error ? error.stack : null,
+          },
+        });
+        throw error;
+      }
+    },
+    [
+      captureCampFileMeta,
+      commitFileWritesToInspectTurn,
+      developerInspectMode,
+      emitInspectEventForTurn,
+    ],
+  );
+
+  const recordFileWriteForTurn = useCallback(
+    async <T,>(campId: string, relativePath: string, operation: () => Promise<T>, summary: string): Promise<T> =>
+      recordFileWritesForTurn(campId, [relativePath], operation, summary),
+    [recordFileWritesForTurn],
+  );
 
   useEffect(() => {
     if (!modelOptions.includes(draftModel)) {
@@ -468,24 +721,68 @@ export function MainLayout() {
         const toolResult = await executeCampToolCall(toolCall, {
           readFile: async (path) => campReadContextFile(campId, path),
           listFiles: async (path) => campListContextFiles(campId, path),
-          writeFile: async (path, content) => campWriteContextFile(campId, path, content),
+          writeFile: async (path, content) => {
+            const normalizedPath = path.trim().replace(/^\/+/, '');
+            await recordFileWritesForTurn(
+              campId,
+              [`context/${normalizedPath}`, 'camp.json'],
+              () => campWriteContextFile(campId, path, content),
+              `Tool write_file -> ${normalizedPath}`,
+            );
+          },
           listArtifacts: async () => campListArtifacts(campId),
           getArtifact: async (artifactId) => campGetArtifact(campId, artifactId),
-          createArtifact: async ({ sourceMessageId, title, tags }) =>
-            campCreateArtifactFromMessage({
-              camp_id: campId,
-              message_id: sourceMessageId,
-              title,
-              tags,
-            }),
-          updateArtifact: async ({ artifactId, title, body, tags }) =>
-            campUpdateArtifact({
-              camp_id: campId,
-              artifact_id: artifactId,
-              title,
-              body,
-              tags,
-            }),
+          createArtifact: async ({ sourceMessageId, title, tags }) => {
+            const artifact = await recordFileWritesForTurn(
+              campId,
+              ['artifacts/index.json', 'camp.json'],
+              () =>
+                campCreateArtifactFromMessage({
+                  camp_id: campId,
+                  message_id: sourceMessageId,
+                  title,
+                  tags,
+                }),
+              'Tool create_artifact',
+            );
+
+            const artifactPath = `artifacts/${artifact.metadata.filename}`;
+            const artifactMeta = await captureCampFileMeta(campId, artifactPath);
+            inspectFileWritesRef.current.set(artifactPath, {
+              path: artifactPath,
+              before: null,
+              after: artifactMeta,
+            });
+            commitFileWritesToInspectTurn();
+
+            return artifact;
+          },
+          updateArtifact: async ({ artifactId, title, body, tags }) => {
+            const artifact = await recordFileWritesForTurn(
+              campId,
+              ['artifacts/index.json', 'camp.json'],
+              () =>
+                campUpdateArtifact({
+                  camp_id: campId,
+                  artifact_id: artifactId,
+                  title,
+                  body,
+                  tags,
+                }),
+              'Tool update_artifact',
+            );
+
+            const artifactPath = `artifacts/${artifact.metadata.filename}`;
+            const artifactMeta = await captureCampFileMeta(campId, artifactPath);
+            inspectFileWritesRef.current.set(artifactPath, {
+              path: artifactPath,
+              before: null,
+              after: artifactMeta,
+            });
+            commitFileWritesToInspectTurn();
+
+            return artifact;
+          },
           searchTranscript: async ({ query, limit, roles }) =>
             campSearchTranscript(campId, {
               query,
@@ -493,17 +790,29 @@ export function MainLayout() {
               roles,
             }),
           updateCampPrompt: async (systemPrompt) => {
-            await campUpdateSystemPrompt({
-              camp_id: campId,
-              system_prompt: systemPrompt,
-            });
+            await recordFileWritesForTurn(
+              campId,
+              ['system_prompt.md', 'camp.json'],
+              () =>
+                campUpdateSystemPrompt({
+                  camp_id: campId,
+                  system_prompt: systemPrompt,
+                }),
+              'Tool update_camp_prompt',
+            );
             setDraftSystemPrompt(systemPrompt);
           },
           updateCampMemory: async (memory) => {
-            await campUpdateMemory({
-              camp_id: campId,
-              memory,
-            });
+            await recordFileWritesForTurn(
+              campId,
+              ['memory.json', 'camp.json'],
+              () =>
+                campUpdateMemory({
+                  camp_id: campId,
+                  memory,
+                }),
+              'Tool update_camp_memory',
+            );
           },
         });
 
@@ -523,6 +832,17 @@ export function MainLayout() {
         return toolResult;
       } catch (toolError) {
         const errorMessage = toolError instanceof Error ? toolError.message : 'Tool execution failed.';
+        void emitInspectEventForActiveTurn(campId, {
+          event_type: 'error',
+          summary: `Tool ${toolCall.function.name} failed`,
+          payload: {
+            tool_call_id: toolCall.id,
+            tool_name: toolCall.function.name,
+            error: errorMessage,
+            stack: toolError instanceof Error ? toolError.stack : null,
+          },
+        });
+
         setToolApprovalQueue((previous) =>
           previous.map((item) =>
             item.id === toolCall.id
@@ -538,7 +858,13 @@ export function MainLayout() {
         return JSON.stringify({ error: errorMessage });
       }
     },
-    [upsertToolApprovalItem],
+    [
+      captureCampFileMeta,
+      commitFileWritesToInspectTurn,
+      emitInspectEventForActiveTurn,
+      recordFileWritesForTurn,
+      upsertToolApprovalItem,
+    ],
   );
 
   useEffect(() => {
@@ -617,24 +943,45 @@ export function MainLayout() {
   const persistCampDraftsForSend = useCallback(async () => {
     if (!selectedCampId) throw new Error('No camp selected.');
 
-    await campUpdateConfig({
-      camp_id: selectedCampId,
-      name: draftName,
-      model: draftModel,
-      tools_enabled: draftToolsEnabled,
-    });
+    await recordFileWriteForTurn(
+      selectedCampId,
+      'camp.json',
+      () =>
+        campUpdateConfig({
+          camp_id: selectedCampId,
+          name: draftName,
+          model: draftModel,
+          tools_enabled: draftToolsEnabled,
+        }),
+      'Persist camp config before send',
+    );
 
-    await campUpdateSystemPrompt({
-      camp_id: selectedCampId,
-      system_prompt: draftSystemPrompt,
-    });
+    await recordFileWritesForTurn(
+      selectedCampId,
+      ['system_prompt.md', 'camp.json'],
+      () =>
+        campUpdateSystemPrompt({
+          camp_id: selectedCampId,
+          system_prompt: draftSystemPrompt,
+        }),
+      'Persist system prompt before send',
+    );
 
     const refreshedCamp = await campLoad(selectedCampId);
     setSelectedCamp(refreshedCamp);
     await loadCamps();
 
     return refreshedCamp;
-  }, [draftModel, draftName, draftSystemPrompt, draftToolsEnabled, loadCamps, selectedCampId]);
+  }, [
+    draftModel,
+    draftName,
+    draftSystemPrompt,
+    draftToolsEnabled,
+    loadCamps,
+    recordFileWriteForTurn,
+    recordFileWritesForTurn,
+    selectedCampId,
+  ]);
 
   const handleSyncModels = async () => {
     setIsSyncingModels(true);
@@ -739,6 +1086,27 @@ export function MainLayout() {
     setStatus(null);
     clearToolApprovalQueue();
 
+    const correlationId = developerInspectMode ? buildCorrelationId() : null;
+    if (correlationId) {
+      activeCorrelationIdRef.current = correlationId;
+      inspectFileWritesRef.current.clear();
+      inspectTimelineRef.current = [];
+      setInspectExportError(null);
+      setInspectTurn({
+        correlationId,
+        events: [],
+        requestPayload: { requests: [] },
+        responsePayload: { responses: [] },
+        filesWritten: [],
+        composedInputBreakdown: null,
+        exportPath: null,
+      });
+    }
+
+    const capturedRequests: unknown[] = [];
+    const capturedResponses: unknown[] = [];
+    let composedBreakdown: unknown = null;
+
     try {
       const apiKey = await getApiKey();
       if (!apiKey) throw new Error('OpenRouter API key is missing. Save it in Settings first.');
@@ -748,12 +1116,18 @@ export function MainLayout() {
         selectedArtifactIds.map((artifactId) => campGetArtifact(selectedCampId, artifactId)),
       );
 
-      await campAppendMessage({
-        camp_id: selectedCampId,
-        role: 'user',
-        content: trimmedMessage,
-        included_artifact_ids: selectedArtifactIds.length > 0 ? selectedArtifactIds : undefined,
-      });
+      await recordFileWritesForTurn(
+        selectedCampId,
+        ['transcript.jsonl', 'camp.json'],
+        () =>
+          campAppendMessage({
+            camp_id: selectedCampId,
+            role: 'user',
+            content: trimmedMessage,
+            included_artifact_ids: selectedArtifactIds.length > 0 ? selectedArtifactIds : undefined,
+          }),
+        'Append user message',
+      );
 
       const campWithUser = await campLoad(selectedCampId);
       setSelectedCamp(campWithUser);
@@ -770,6 +1144,175 @@ export function MainLayout() {
             setStreamingText((previous) => previous + token);
           },
           tools: CAMP_TOOLS,
+          correlationId: correlationId ?? undefined,
+          onComposeStart: correlationId
+            ? () => {
+              void emitInspectEventForTurn(selectedCampId, correlationId, {
+                event_type: 'compose_start',
+                summary: 'Composing OpenRouter payload',
+              });
+            }
+            : undefined,
+          onComposeEnd: correlationId
+            ? ({ requestPayload, breakdown }) => {
+              composedBreakdown = breakdown;
+              setInspectTurn((previous) => {
+                if (!previous || previous.correlationId !== correlationId) {
+                  return previous;
+                }
+
+                return {
+                  ...previous,
+                  composedInputBreakdown: breakdown,
+                };
+              });
+
+              void emitInspectEventForTurn(selectedCampId, correlationId, {
+                event_type: 'compose_end',
+                summary: `Composed ${requestPayload.messages.length} messages`,
+                payload: {
+                  model: requestPayload.model,
+                  message_count: requestPayload.messages.length,
+                  tool_count: requestPayload.tools?.length ?? 0,
+                  artifact_count: breakdown && typeof breakdown === 'object' && 'artifacts' in breakdown
+                    ? ((breakdown as { artifacts?: unknown[] }).artifacts?.length ?? 0)
+                    : 0,
+                },
+              });
+            }
+            : undefined,
+          telemetry: correlationId
+            ? {
+              onHttpRequestStart: (httpEvent) => {
+                capturedRequests.push(httpEvent.request_payload);
+                setInspectTurn((previous) => {
+                  if (!previous || previous.correlationId !== correlationId) {
+                    return previous;
+                  }
+
+                  const existing = previous.requestPayload?.requests ?? [];
+                  return {
+                    ...previous,
+                    requestPayload: {
+                      requests: [...existing, httpEvent.request_payload],
+                    },
+                  };
+                });
+
+                void emitInspectEventForTurn(selectedCampId, correlationId, {
+                  event_type: 'http_request_start',
+                  summary: `OpenRouter request (${httpEvent.message_count} messages)`,
+                  payload: {
+                    model: httpEvent.request_payload.model,
+                    message_count: httpEvent.message_count,
+                    stream: httpEvent.stream,
+                  },
+                });
+              },
+              onHttpRequestEnd: (httpEvent) => {
+                const nextResponse = {
+                  status_code: httpEvent.status,
+                  duration_ms: httpEvent.duration_ms,
+                  headers: httpEvent.response_headers,
+                  body: httpEvent.response_payload,
+                  stream: httpEvent.stream,
+                  stream_chunk_count: httpEvent.stream_chunk_count ?? null,
+                };
+                capturedResponses.push(nextResponse);
+                setInspectTurn((previous) => {
+                  if (!previous || previous.correlationId !== correlationId) {
+                    return previous;
+                  }
+
+                  const existing = previous.responsePayload?.responses ?? [];
+                  return {
+                    ...previous,
+                    responsePayload: {
+                      responses: [...existing, nextResponse],
+                    },
+                  };
+                });
+
+                void emitInspectEventForTurn(selectedCampId, correlationId, {
+                  event_type: 'http_request_end',
+                  duration_ms: httpEvent.duration_ms,
+                  summary: `OpenRouter response ${httpEvent.status}`,
+                  payload: {
+                    status_code: httpEvent.status,
+                    stream: httpEvent.stream,
+                    stream_chunk_count: httpEvent.stream_chunk_count ?? 0,
+                  },
+                });
+
+                if (typeof httpEvent.stream_chunk_count === 'number' && httpEvent.stream_chunk_count > 0) {
+                  void emitInspectEventForTurn(selectedCampId, correlationId, {
+                    event_type: 'stream_chunk',
+                    summary: `${httpEvent.stream_chunk_count} stream chunks`,
+                    payload: {
+                      count: httpEvent.stream_chunk_count,
+                    },
+                  });
+                }
+              },
+              onHttpRequestError: (httpEvent) => {
+                const nextResponse = {
+                  status_code: httpEvent.status ?? null,
+                  duration_ms: httpEvent.duration_ms,
+                  error: httpEvent.error_message,
+                  response: httpEvent.response_payload,
+                  stream: httpEvent.stream,
+                };
+                capturedResponses.push(nextResponse);
+                setInspectTurn((previous) => {
+                  if (!previous || previous.correlationId !== correlationId) {
+                    return previous;
+                  }
+
+                  const existing = previous.responsePayload?.responses ?? [];
+                  return {
+                    ...previous,
+                    responsePayload: {
+                      responses: [...existing, nextResponse],
+                    },
+                  };
+                });
+
+                void emitInspectEventForTurn(selectedCampId, correlationId, {
+                  event_type: 'error',
+                  duration_ms: httpEvent.duration_ms,
+                  summary: 'OpenRouter request failed',
+                  payload: {
+                    status_code: httpEvent.status ?? null,
+                    error: httpEvent.error_message,
+                    response: httpEvent.response_payload,
+                    stack: httpEvent.stack ?? null,
+                  },
+                });
+              },
+              onToolCallStart: (toolEvent) => {
+                void emitInspectEventForTurn(selectedCampId, correlationId, {
+                  event_type: 'tool_call_start',
+                  summary: `Tool call ${toolEvent.tool_name} started`,
+                  payload: {
+                    tool_call_id: toolEvent.tool_call_id,
+                    tool_name: toolEvent.tool_name,
+                  },
+                });
+              },
+              onToolCallEnd: (toolEvent) => {
+                void emitInspectEventForTurn(selectedCampId, correlationId, {
+                  event_type: 'tool_call_end',
+                  duration_ms: toolEvent.duration_ms,
+                  summary: `Tool call ${toolEvent.tool_name} ${toolEvent.success ? 'completed' : 'returned error'}`,
+                  payload: {
+                    tool_call_id: toolEvent.tool_call_id,
+                    tool_name: toolEvent.tool_name,
+                    success: toolEvent.success,
+                  },
+                });
+              },
+            }
+            : undefined,
           executeToolCall: async ({ campId, toolCall }) => {
             return executeToolCallWithApproval(campId, toolCall);
           },
@@ -778,9 +1321,51 @@ export function MainLayout() {
       const runtimeResult = await runRuntime(campWithUser);
 
       for (const message of runtimeResult.transcriptMessages) {
-        await campAppendMessage({
+        await recordFileWritesForTurn(
+          selectedCampId,
+          ['transcript.jsonl', 'camp.json'],
+          () =>
+            campAppendMessage({
+              camp_id: selectedCampId,
+              ...message,
+            }),
+          `Append ${message.role} message`,
+        );
+      }
+
+      if (correlationId) {
+        const requestPayloadForFile = {
+          correlation_id: correlationId,
+          composed_input_breakdown: composedBreakdown ?? runtimeResult.composedInputBreakdown,
+          requests: capturedRequests,
+        };
+        const responsePayloadForFile = {
+          correlation_id: correlationId,
+          responses: capturedResponses,
+        };
+
+        await inspectWriteTurnRequest({
           camp_id: selectedCampId,
-          ...message,
+          correlation_id: correlationId,
+          payload: requestPayloadForFile,
+        });
+        await inspectWriteTurnResponse({
+          camp_id: selectedCampId,
+          correlation_id: correlationId,
+          payload: responsePayloadForFile,
+        });
+
+        setInspectTurn((previous) => {
+          if (!previous || previous.correlationId !== correlationId) {
+            return previous;
+          }
+
+          return {
+            ...previous,
+            requestPayload: { requests: capturedRequests },
+            responsePayload: { responses: capturedResponses },
+            composedInputBreakdown: composedBreakdown ?? runtimeResult.composedInputBreakdown,
+          };
         });
       }
 
@@ -788,7 +1373,12 @@ export function MainLayout() {
       setSelectedCamp(updatedCamp);
       const usageIncrementPromise =
         selectedArtifactIds.length > 0
-          ? campIncrementArtifactUsage(selectedCampId, selectedArtifactIds)
+          ? recordFileWritesForTurn(
+            selectedCampId,
+            ['artifacts/index.json', 'camp.json'],
+            () => campIncrementArtifactUsage(selectedCampId, selectedArtifactIds),
+            'Increment selected artifact usage',
+          )
           : Promise.resolve();
       const [, , refreshedContextFiles] = await Promise.all([
         loadCamps(),
@@ -798,6 +1388,47 @@ export function MainLayout() {
       ]);
       setAttachedContextFiles(refreshedContextFiles);
 
+      if (correlationId) {
+        const filesWritten = [...inspectFileWritesRef.current.values()]
+          .sort((left, right) => left.path.localeCompare(right.path))
+          .map((entry) => ({
+            path: entry.path,
+            before: entry.before,
+            after: entry.after,
+          }));
+
+        const bundlePayload = {
+          correlation_id: correlationId,
+          composed_input_breakdown: composedBreakdown ?? runtimeResult.composedInputBreakdown,
+          openrouter_request_json: {
+            requests: capturedRequests,
+          },
+          openrouter_response_json: {
+            responses: capturedResponses,
+          },
+          event_timeline: inspectTimelineRef.current,
+          files_written: filesWritten,
+        };
+
+        const bundlePath = await inspectWriteTurnBundle({
+          camp_id: selectedCampId,
+          correlation_id: correlationId,
+          payload: bundlePayload,
+        });
+
+        setInspectTurn((previous) => {
+          if (!previous || previous.correlationId !== correlationId) {
+            return previous;
+          }
+
+          return {
+            ...previous,
+            filesWritten,
+            exportPath: bundlePath || previous.exportPath,
+          };
+        });
+      }
+
       setUserMessage('');
       setStreamingText('');
       setStatus(
@@ -806,6 +1437,17 @@ export function MainLayout() {
           : 'Response streamed and saved to transcript.jsonl',
       );
     } catch (sendError) {
+      if (correlationId) {
+        await emitInspectEventForTurn(selectedCampId, correlationId, {
+          event_type: 'error',
+          summary: 'Chat turn failed',
+          payload: {
+            error: sendError instanceof Error ? sendError.message : 'Unknown send error.',
+            stack: sendError instanceof Error ? sendError.stack : null,
+          },
+        });
+      }
+
       if (sendError instanceof OpenRouterRequestError) {
         setError(`${sendError.message} (model: ${sendError.requestPayload.model})`);
       } else {
@@ -830,6 +1472,57 @@ export function MainLayout() {
       event.currentTarget.form?.requestSubmit();
     }
   };
+
+  const buildInspectBundlePayload = useCallback((turn: ActiveInspectTurn) => {
+    const filesWritten = turn.filesWritten
+      .map((entry) => ({
+        path: entry.path,
+        before: entry.before,
+        after: entry.after,
+      }))
+      .sort((left, right) => left.path.localeCompare(right.path));
+
+    return {
+      correlation_id: turn.correlationId,
+      composed_input_breakdown: turn.composedInputBreakdown,
+      openrouter_request_json: turn.requestPayload ?? { requests: [] },
+      openrouter_response_json: turn.responsePayload ?? { responses: [] },
+      event_timeline: [...turn.events].sort((left, right) => left.timestamp_ms - right.timestamp_ms),
+      files_written: filesWritten,
+    };
+  }, []);
+
+  const handleExportTurnBundle = useCallback(async () => {
+    if (!selectedCampId || !inspectTurn) {
+      return;
+    }
+
+    setInspectExporting(true);
+    setInspectExportError(null);
+
+    try {
+      const bundlePath = await inspectWriteTurnBundle({
+        camp_id: selectedCampId,
+        correlation_id: inspectTurn.correlationId,
+        payload: buildInspectBundlePayload(inspectTurn),
+      });
+
+      setInspectTurn((previous) => {
+        if (!previous || previous.correlationId !== inspectTurn.correlationId) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          exportPath: bundlePath || previous.exportPath,
+        };
+      });
+    } catch (error) {
+      setInspectExportError(error instanceof Error ? error.message : 'Unable to export turn bundle.');
+    } finally {
+      setInspectExporting(false);
+    }
+  }, [buildInspectBundlePayload, inspectTurn, selectedCampId]);
 
   const renderContextTree = (nodes: ContextTreeNode[], depth = 0) => {
     return nodes.map((node) => {
@@ -1115,6 +1808,16 @@ export function MainLayout() {
               ) : null}
             </div>
           </section>
+
+          <InspectPanel
+            enabled={developerInspectMode}
+            turn={inspectTurn}
+            exporting={inspectExporting}
+            exportError={inspectExportError}
+            onExport={() => {
+              void handleExportTurnBundle();
+            }}
+          />
 
           <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ borderTop: 'var(--border-width) solid var(--line)', paddingTop: 'var(--space-3)' }}>
             <textarea
