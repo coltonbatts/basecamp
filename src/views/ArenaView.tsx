@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Fragment } from 'react';
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { useNavigate } from 'react-router-dom';
 import { dbListModels, getApiKey } from '../lib/db';
 import { streamOpenRouterChatCompletion, type OpenRouterChatRequestPayload } from '../lib/openrouter';
@@ -270,8 +271,8 @@ export function ArenaView() {
             </section>
 
             {/* Slot columns */}
-            <div className="arena-grid" style={{ gridTemplateColumns: `repeat(${slots.length}, minmax(0, 1fr))` }}>
-                {slots.map((slot) => {
+            <PanelGroup orientation="horizontal" className="arena-panel-group">
+                {slots.map((slot, index) => {
                     const filteredModels = models.filter(
                         (m) =>
                             m.id.toLowerCase().includes(slot.modelQuery.toLowerCase()) ||
@@ -291,70 +292,73 @@ export function ArenaView() {
                     }
 
                     return (
-                        <div key={slot.id} className={`arena-slot panel ${slot.status}`}>
-                            <div className="arena-slot-header">
-                                <div>
-                                    <label>
-                                        <span className="hint">Search Model</span>
-                                        <input
-                                            type="text"
-                                            placeholder="e.g. claude"
-                                            value={slot.modelQuery}
-                                            onChange={(e) =>
-                                                setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, modelQuery: e.target.value } : s)))
-                                            }
-                                            disabled={isRunning}
-                                        />
-                                    </label>
-                                    <label>
-                                        <span className="hint">Model</span>
-                                        <select
-                                            value={slot.model}
-                                            onChange={(e) =>
-                                                setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, model: e.target.value } : s)))
-                                            }
-                                            disabled={isRunning}
-                                        >
-                                            {options.map((m) => (
-                                                <option key={m.id} value={m.id}>
-                                                    {modelDisplayLabel(m)}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </label>
-                                </div>
-                                {slots.length > 2 && (
-                                    <button onClick={() => handleRemoveSlot(slot.id)} disabled={isRunning}>
-                                        Remove
-                                    </button>
-                                )}
-                            </div>
-
-                            <div className="arena-slot-status">
-                                {slot.status === 'running' && (
-                                    <span className="arena-timer">
-                                        Running... <ArenaTimer />
-                                    </span>
-                                )}
-                                {slot.status === 'done' && (
-                                    <div className="arena-slot-meta">
-                                        {slot.resolvedModel && slot.resolvedModel !== slot.model && (
-                                            <span>Auto → {slot.resolvedModel}</span>
-                                        )}
-                                        <span>{slot.totalTokens?.toLocaleString() ?? '—'} tokens</span>
-                                        <span>{slot.latencyMs ? `${slot.latencyMs.toLocaleString()} ms` : '—'}</span>
+                        <Fragment key={slot.id}>
+                            {index > 0 && <PanelResizeHandle className="ide-resize-handle" />}
+                            <Panel defaultSize={100 / slots.length} minSize={15} className={`arena-slot panel ${slot.status}`}>
+                                <div className="arena-slot-header">
+                                    <div>
+                                        <label>
+                                            <span className="hint">Search Model</span>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. claude"
+                                                value={slot.modelQuery}
+                                                onChange={(e) =>
+                                                    setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, modelQuery: e.target.value } : s)))
+                                                }
+                                                disabled={isRunning}
+                                            />
+                                        </label>
+                                        <label>
+                                            <span className="hint">Model</span>
+                                            <select
+                                                value={slot.model}
+                                                onChange={(e) =>
+                                                    setSlots((prev) => prev.map((s) => (s.id === slot.id ? { ...s, model: e.target.value } : s)))
+                                                }
+                                                disabled={isRunning}
+                                            >
+                                                {options.map((m) => (
+                                                    <option key={m.id} value={m.id}>
+                                                        {modelDisplayLabel(m)}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </label>
                                     </div>
-                                )}
-                                {slot.status === 'error' && <span className="arena-slot-error">{slot.error}</span>}
-                            </div>
+                                    {slots.length > 2 && (
+                                        <button onClick={() => handleRemoveSlot(slot.id)} disabled={isRunning}>
+                                            Remove
+                                        </button>
+                                    )}
+                                </div>
 
-                            <div className="arena-slot-output">
-                                <pre data-placeholder="Waiting for run...">{slot.streamingText || (slot.status === 'idle' ? '' : '')}</pre>
-                            </div>
-                        </div>
+                                <div className="arena-slot-status">
+                                    {slot.status === 'running' && (
+                                        <span className="arena-timer">
+                                            Running... <ArenaTimer />
+                                        </span>
+                                    )}
+                                    {slot.status === 'done' && (
+                                        <div className="arena-slot-meta">
+                                            {slot.resolvedModel && slot.resolvedModel !== slot.model && (
+                                                <span>Auto → {slot.resolvedModel}</span>
+                                            )}
+                                            <span>{slot.totalTokens?.toLocaleString() ?? '—'} tokens</span>
+                                            <span>{slot.latencyMs ? `${slot.latencyMs.toLocaleString()} ms` : '—'}</span>
+                                        </div>
+                                    )}
+                                    {slot.status === 'error' && <span className="arena-slot-error">{slot.error}</span>}
+                                </div>
+
+                                <div className="arena-slot-output">
+                                    <pre data-placeholder="Waiting for run...">{slot.streamingText || (slot.status === 'idle' ? '' : '')}</pre>
+                                </div>
+                            </Panel>
+                        </Fragment>
                     );
                 })}
-            </div>
+            </PanelGroup>
         </div>
     );
 }

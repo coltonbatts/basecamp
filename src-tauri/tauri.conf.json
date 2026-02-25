@@ -16,7 +16,20 @@
         "width": 800,
         "height": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": false
+      },
+      {
+        "title": "Loading Basecamp",
+        "label": "splashscreen",
+        "url": "/splash.html",
+        "center": true,
+        "width": 640,
+        "height": 800,
+        "resizable": false,
+        "fullscreen": false,
+        "transparent": true,
+        "decorations": false
       }
     ],
     "security": {

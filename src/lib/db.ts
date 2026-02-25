@@ -131,6 +131,10 @@ export async function campList(): Promise<CampSummary[]> {
   return invoke<CampSummary[]>('camp_list');
 }
 
+export async function campDelete(id: string): Promise<void> {
+  await invoke('camp_delete', { campId: id });
+}
+
 export async function campCreate(payload: CampCreatePayload): Promise<Camp> {
   return invoke<Camp>('camp_create', { payload });
 }

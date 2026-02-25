@@ -1,5 +1,5 @@
 .trail-shell {
-  min-height: 100%;
+  height: 100%;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -69,16 +69,43 @@
   color: var(--accent);
 }
 
-.trail-grid {
+.ide-panel-container {
   min-height: 0;
   flex: 1;
-  display: grid;
-  gap: var(--space-3);
-  grid-template-columns: minmax(270px, 310px) minmax(0, 1fr);
+  display: flex;
 }
 
-.ide-grid {
-  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr) minmax(340px, 430px);
+.ide-panel-group,
+.arena-panel-group {
+  width: 100%;
+  height: 100%;
+}
+
+.ide-resize-handle {
+  width: var(--space-3);
+  position: relative;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ide-resize-handle::after {
+  content: '';
+  width: var(--border-width);
+  height: 100%;
+  background-color: var(--line);
+  transition: background-color 0s;
+}
+
+.ide-resize-handle-horizontal::after {
+  width: 100%;
+  height: var(--border-width);
+}
+
+.ide-resize-handle:hover::after,
+.ide-resize-handle[data-resize-handle-state='drag']::after {
+  background-color: var(--accent);
 }
 
 .ide-pane {
@@ -97,6 +124,46 @@
 .ide-canvas,
 .ide-chat {
   gap: var(--space-3);
+}
+
+.panel-group-vertical-split {
+  display: flex;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ide-basecamp-orchestrator {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.basecamp-orchestrator-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  min-height: 0;
+  height: 100%;
+}
+
+.basecamp-settings-col {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.basecamp-composer-col {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.basecamp-inline-status {
+  padding: var(--space-2);
+  font-size: var(--text-xs);
 }
 
 .ide-drawer {
@@ -289,12 +356,26 @@ label span,
 }
 
 .camp-list-scroll,
-.artifact-scroll,
-.transcript-scroll {
+.artifact-scroll {
   min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
+  border: var(--border-width) solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  padding: var(--space-2);
+  clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+      100% var(--corner), 100% calc(100% - var(--corner)),
+      calc(100% - var(--corner)) 100%, var(--corner) 100%,
+      0 calc(100% - var(--corner)), 0 var(--corner));
+}
+
+.transcript-scroll {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column-reverse;
   gap: var(--space-2);
   border: var(--border-width) solid var(--line);
   background: rgba(255, 255, 255, 0.03);
@@ -737,21 +818,25 @@ button:disabled {
   }
 }
 
-@media (max-width: 1480px) {
-  .ide-grid {
-    grid-template-columns: minmax(250px, 320px) minmax(0, 1fr);
-  }
+.delete-action {
+  background: transparent;
+  color: var(--text-muted);
+  border: var(--border-width) solid transparent;
+}
 
+.delete-action:hover {
+  color: #ff4500;
+  border-color: #ff4500;
+  background: rgba(255, 69, 0, 0.1);
+}
+
+@media (max-width: 1480px) {
   .ide-chat {
     grid-column: 1 / -1;
   }
 }
 
 @media (max-width: 1120px) {
-  .trail-grid {
-    grid-template-columns: 1fr;
-  }
-
   .ide-chat {
     grid-column: auto;
   }
@@ -844,12 +929,7 @@ button:disabled {
   width: 80px;
 }
 
-.arena-grid {
-  display: grid;
-  gap: var(--space-3);
-  min-height: 0;
-  flex: 1;
-}
+
 
 .arena-slot {
   display: flex;
@@ -950,16 +1030,4 @@ button:disabled {
 
 .arena-slot.done .arena-slot-output {
   border-top-color: var(--accent);
-}
-
-@media (max-width: 1100px) {
-  .arena-grid {
-    grid-template-columns: 1fr 1fr !important;
-  }
-}
-
-@media (max-width: 700px) {
-  .arena-grid {
-    grid-template-columns: 1fr !important;
-  }
 }

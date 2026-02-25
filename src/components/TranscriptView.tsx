@@ -28,7 +28,17 @@ function roleLabel(role: CampMessage['role']): string {
 export function TranscriptView(props: TranscriptViewProps) {
   return (
     <div className="transcript-scroll">
-      {props.selectedCamp?.transcript.map((message) => (
+      {props.streamingText ? (
+        <article className="message message-assistant streaming">
+          <header>
+            <span>Assistant</span>
+            <time>streaming...</time>
+          </header>
+          <p>{props.streamingText}</p>
+        </article>
+      ) : null}
+
+      {[...(props.selectedCamp?.transcript || [])].reverse().map((message) => (
         <article key={message.id} className={`message message-${message.role}`}>
           <header>
             <span>{roleLabel(message.role)}</span>
@@ -68,16 +78,6 @@ export function TranscriptView(props: TranscriptViewProps) {
           ) : null}
         </article>
       ))}
-
-      {props.streamingText ? (
-        <article className="message message-assistant streaming">
-          <header>
-            <span>Assistant</span>
-            <time>streaming...</time>
-          </header>
-          <p>{props.streamingText}</p>
-        </article>
-      ) : null}
 
       {!props.selectedCamp ? <p className="hint">Pick a camp and send your first message.</p> : null}
       {props.selectedCamp && !props.selectedCamp.transcript.length && !props.streamingText ? (

@@ -6,6 +6,7 @@ import {
   campCreate,
   campList,
   campLoad,
+  campDelete,
   dbListModels,
   ensureDefaultWorkspace,
   getApiKey,
@@ -205,6 +206,21 @@ export function HomeView() {
     }
   };
 
+  const handleDeleteCamp = async (campId: string, campName: string) => {
+    if (!window.confirm(`Are you sure you want to delete "${campName}"? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await campDelete(campId);
+      // Refresh the camp list to reflect the deletion
+      await loadCamps();
+      setStatus(`Deleted camp "${campName}".`);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete camp.');
+    }
+  };
+
   const handleRefreshModels = async () => {
     setIsRefreshingModels(true);
     resetFeedback();
@@ -299,6 +315,7 @@ export function HomeView() {
               camp={camp}
               promptPreview={campMetaById[camp.id]?.promptPreview ?? 'No context yet.'}
               onOpen={() => navigate(`/camp/${camp.id}`)}
+              onDelete={() => void handleDeleteCamp(camp.id, camp.name)}
             />
           ))}
           {visibleCamps.length === 0 ? <p className="empty-state">No camps match this search.</p> : null}

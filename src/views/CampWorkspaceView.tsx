@@ -35,6 +35,7 @@ import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterChatRequestPayload } from '../lib/openrouter';
 import { executeFilesystemToolCall, FILESYSTEM_TOOLS } from '../lib/tools';
 import type { Camp, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
 
 const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
@@ -910,355 +911,385 @@ export function CampWorkspaceView() {
       {status ? <p className="status-line">{status}</p> : null}
       {error ? <p className="error-line">{error}</p> : null}
 
-      <main className="trail-grid ide-grid">
-        <aside className="panel ide-pane ide-explorer">
-          <div className="panel-header">
-            <h2>Explorer</h2>
-            <span className="count-pill">{attachedContextFiles.length}</span>
-          </div>
+      <main className="ide-panel-container">
+        <PanelGroup orientation="vertical" className="ide-panel-group">
+          {/* Top Section: The Line (Explorer, Canvas, Transcript) */}
+          <Panel defaultSize={70} minSize={30} className="panel-group-vertical-split">
+            <PanelGroup orientation="horizontal" className="ide-panel-group">
+              {/* Explorer */}
+              <Panel defaultSize={20} minSize={15} className="panel ide-pane ide-explorer">
+                <div className="panel-header">
+                  <h2>Explorer</h2>
+                  <span className="count-pill">{attachedContextFiles.length}</span>
+                </div>
 
-          <details className="artifact-drawer ide-drawer" open>
-            <summary>Create Camp</summary>
+                <details className="artifact-drawer ide-drawer" open>
+                  <summary>Create Camp</summary>
 
-            <label>
-              <span>Name</span>
-              <input
-                value={newCampName}
-                onChange={(event) => setNewCampName(event.target.value)}
-                placeholder="New Camp"
-                aria-label="New camp name"
-              />
-            </label>
+                  <label>
+                    <span>Name</span>
+                    <input
+                      value={newCampName}
+                      onChange={(event) => setNewCampName(event.target.value)}
+                      placeholder="New Camp"
+                      aria-label="New camp name"
+                    />
+                  </label>
 
-            <label>
-              <span>Search Model</span>
-              <input
-                value={newCampModelQuery}
-                onChange={(event) => setNewCampModelQuery(event.target.value)}
-                placeholder="Search models"
-              />
-            </label>
+                  <label>
+                    <span>Search Model</span>
+                    <input
+                      value={newCampModelQuery}
+                      onChange={(event) => setNewCampModelQuery(event.target.value)}
+                      placeholder="Search models"
+                    />
+                  </label>
 
-            <label>
-              <span>Model</span>
-              <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
-                {(filteredCreateModelOptions.length > 0 ? filteredCreateModelOptions : modelOptionsWithLabels).map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+                  <label>
+                    <span>Model</span>
+                    <select value={newCampModel} onChange={(event) => setNewCampModel(event.target.value)}>
+                      {(filteredCreateModelOptions.length > 0 ? filteredCreateModelOptions : modelOptionsWithLabels).map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-            <div className="builder-inline-actions">
-              <button type="button" onClick={handlePickRandomModel} disabled={modelOptionsWithLabels.length === 0}>
-                Randomize
-              </button>
-              <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={!workspacePath}>
-                Create Camp
-              </button>
-            </div>
-          </details>
+                  <div className="builder-inline-actions">
+                    <button type="button" onClick={handlePickRandomModel} disabled={modelOptionsWithLabels.length === 0}>
+                      Randomize
+                    </button>
+                    <button type="button" className="primary-action" onClick={handleCreateCamp} disabled={!workspacePath}>
+                      Create Camp
+                    </button>
+                  </div>
+                </details>
 
-          <section className="explorer-section camp-list-panel">
-            <div className="panel-header">
-              <h2>Camps</h2>
-              <span className="count-pill">{camps.length}</span>
-            </div>
-            <div className="camp-list-scroll">
-              {camps.map((camp) => (
-                <button
-                  type="button"
-                  key={camp.id}
-                  className={`camp-list-item ${camp.id === selectedCampId ? 'active' : ''}`}
-                  onClick={() => setSelectedCampId(camp.id)}
-                >
-                  <strong>{camp.name}</strong>
-                  <span>{camp.model}</span>
-                </button>
-              ))}
-              {camps.length === 0 ? <p className="hint">No camps yet. Create one above.</p> : null}
-            </div>
-          </section>
+                <section className="explorer-section camp-list-panel">
+                  <div className="panel-header">
+                    <h2>Camps</h2>
+                    <span className="count-pill">{camps.length}</span>
+                  </div>
+                  <div className="camp-list-scroll">
+                    {camps.map((camp) => (
+                      <button
+                        type="button"
+                        key={camp.id}
+                        className={`camp-list-item ${camp.id === selectedCampId ? 'active' : ''}`}
+                        onClick={() => setSelectedCampId(camp.id)}
+                      >
+                        <strong>{camp.name}</strong>
+                        <span>{camp.model}</span>
+                      </button>
+                    ))}
+                    {camps.length === 0 ? <p className="hint">No camps yet. Create one above.</p> : null}
+                  </div>
+                </section>
 
-          <section className="explorer-section explorer-tree">
-            <div className="panel-header">
-              <h2>Context Tree</h2>
-              <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext}>
-                {isRefreshingContext ? 'Refreshing...' : 'Refresh'}
-              </button>
-            </div>
+                <section className="explorer-section explorer-tree">
+                  <div className="panel-header">
+                    <h2>Context Tree</h2>
+                    <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext}>
+                      {isRefreshingContext ? 'Refreshing...' : 'Refresh'}
+                    </button>
+                  </div>
 
-            <label>
-              <span>Filter Files</span>
-              <input
-                value={contextTreeQuery}
-                onChange={(event) => setContextTreeQuery(event.target.value)}
-                placeholder="path or file"
-              />
-            </label>
+                  <label>
+                    <span>Filter Files</span>
+                    <input
+                      value={contextTreeQuery}
+                      onChange={(event) => setContextTreeQuery(event.target.value)}
+                      placeholder="path or file"
+                    />
+                  </label>
 
-            <div className="context-tree-scroll">
-              {!selectedCamp ? <p className="hint">Select a camp to view its context tree.</p> : null}
-              {selectedCamp && contextTree.length === 0 ? <p className="hint">No attached context files.</p> : null}
-              {selectedCamp ? renderContextTree(contextTree) : null}
-            </div>
-          </section>
-        </aside>
+                  <div className="context-tree-scroll">
+                    {!selectedCamp ? <p className="hint">Select a camp to view its context tree.</p> : null}
+                    {selectedCamp && contextTree.length === 0 ? <p className="hint">No attached context files.</p> : null}
+                    {selectedCamp ? renderContextTree(contextTree) : null}
+                  </div>
+                </section>
+              </Panel>
 
-        <section className="panel ide-pane ide-canvas">
-          <div className="panel-header chat-header">
-            <div>
-              <h2>Canvas</h2>
-              <p className="hint">{selectedContextFilePath ?? 'Select a file from the explorer to view or edit.'}</p>
-            </div>
-            <div className="canvas-actions">
-              {selectedCamp ? (
-                <button type="button" onClick={handleSaveCamp} disabled={isSaving}>
-                  {isSaving ? 'Saving Camp...' : 'Save Camp'}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className="primary-action"
-                onClick={handleSaveContextFile}
-                disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
-              >
-                {isSavingContextFile ? 'Saving File...' : 'Save File'}
-              </button>
-            </div>
-          </div>
+              <PanelResizeHandle className="ide-resize-handle" />
 
-          <div className="canvas-editor-shell">
-            {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
-            {selectedCamp && !selectedContextFilePath ? <p className="hint">Attach files to this camp, then pick one from the tree.</p> : null}
-            {selectedCamp && selectedContextFilePath ? (
-              isLoadingContextFile ? (
-                <p className="hint">Loading file...</p>
-              ) : (
-                <textarea
-                  className="canvas-editor"
-                  value={contextFileDraft}
-                  onChange={(event) => setContextFileDraft(event.target.value)}
-                  spellCheck={false}
+              <Panel defaultSize={50} minSize={30} className="panel ide-pane ide-canvas">
+                <div className="panel-header chat-header">
+                  <div>
+                    <h2>Canvas</h2>
+                    <p className="hint">{selectedContextFilePath ?? 'Select a file from the explorer to view or edit.'}</p>
+                  </div>
+                  <div className="canvas-actions">
+                    {selectedCamp ? (
+                      <button type="button" onClick={handleSaveCamp} disabled={isSaving}>
+                        {isSaving ? 'Saving Camp...' : 'Save Camp'}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="primary-action"
+                      onClick={handleSaveContextFile}
+                      disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
+                    >
+                      {isSavingContextFile ? 'Saving File...' : 'Save File'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="canvas-editor-shell">
+                  {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
+                  {selectedCamp && !selectedContextFilePath ? <p className="hint">Attach files to this camp, then pick one from the tree.</p> : null}
+                  {selectedCamp && selectedContextFilePath ? (
+                    isLoadingContextFile ? (
+                      <p className="hint">Loading file...</p>
+                    ) : (
+                      <textarea
+                        className="canvas-editor"
+                        value={contextFileDraft}
+                        onChange={(event) => setContextFileDraft(event.target.value)}
+                        spellCheck={false}
+                      />
+                    )
+                  ) : null}
+                </div>
+
+                {selectedCamp ? (
+                  <details className="artifact-drawer camp-context-drawer">
+                    <summary>Workspace Context Files ({attachedContextFiles.length} attached)</summary>
+                    <div className="camp-context-toolbar">
+                      <p className="hint">Attach files from workspace `context/` for reusable camp context.</p>
+                    </div>
+
+                    <div className="artifact-scroll">
+                      {globalContextFiles.map((path) => {
+                        const isAttached = attachedContextFiles.includes(path);
+
+                        return (
+                          <article key={path} className="artifact-item camp-context-item">
+                            <header>
+                              <strong>{path}</strong>
+                              <button
+                                type="button"
+                                className={isAttached ? '' : 'primary-action'}
+                                disabled={isMutatingContext}
+                                onClick={() => {
+                                  if (isAttached) {
+                                    void handleDetachContext(path);
+                                    return;
+                                  }
+                                  void handleAttachContext(path);
+                                }}
+                              >
+                                {isAttached ? 'Detach' : 'Attach'}
+                              </button>
+                            </header>
+                          </article>
+                        );
+                      })}
+                      {globalContextFiles.length === 0 ? <p className="hint">No files found in workspace `context/`.</p> : null}
+                    </div>
+                  </details>
+                ) : null}
+              </Panel>
+
+              <PanelResizeHandle className="ide-resize-handle" />
+
+              {/* Transcript / Chat History */}
+              <Panel defaultSize={30} minSize={20} className="panel ide-pane ide-chat">
+                <div className="panel-header chat-header">
+                  <div>
+                    <h2>Chat</h2>
+                    <p className="hint">{selectedCamp ? draftName : 'Create one on the left to start chatting.'}</p>
+                  </div>
+
+                  {selectedCamp ? (
+                    <div style={{ textAlign: 'right' }}>
+                      <label className="chat-model-picker">
+                        <span>Agent Model (Locked To Camp)</span>
+                        <select value={draftModel} onChange={(event) => setDraftModel(event.target.value)}>
+                          {(filteredDraftModelOptions.length > 0 ? filteredDraftModelOptions : modelOptionsWithLabels).map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {resolvedModel && resolvedModel !== draftModel && (
+                        <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
+                          Resolved: {resolvedModel}
+                        </div>
+                      )}
+                      {sessionTokens > 0 && (
+                        <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
+                          {sessionTokens.toLocaleString()} tokens
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+
+                <TranscriptView
+                  selectedCamp={selectedCamp}
+                  streamingText={streamingText}
+                  artifactById={artifactById}
+                  isSending={isSending}
+                  promotingMessageId={promotingMessageId}
+                  onPromoteMessageToArtifact={(message) => {
+                    void handlePromoteMessageToArtifact(message);
+                  }}
                 />
-              )
-            ) : null}
-          </div>
+              </Panel>
+            </PanelGroup>
+          </Panel>
 
-          {selectedCamp ? (
-            <details className="artifact-drawer camp-context-drawer">
-              <summary>Workspace Context Files ({attachedContextFiles.length} attached)</summary>
-              <div className="camp-context-toolbar">
-                <p className="hint">Attach files from workspace `context/` for reusable camp context.</p>
+          <PanelResizeHandle className="ide-resize-handle ide-resize-handle-horizontal" />
+
+          {/* Bottom Section: Basecamp Orchestrator */}
+          <Panel defaultSize={30} minSize={20} className="panel ide-basecamp-orchestrator">
+            <div className="basecamp-orchestrator-grid">
+              <div className="basecamp-settings-col">
+
+                {selectedCamp ? (
+                  <CampSettingsPanel
+                    draftName={draftName}
+                    onDraftNameChange={setDraftName}
+                    draftModelQuery={draftModelQuery}
+                    onDraftModelQueryChange={setDraftModelQuery}
+                    draftModel={draftModel}
+                    onDraftModelChange={setDraftModel}
+                    filteredDraftModelOptions={filteredDraftModelOptions}
+                    modelOptionsWithLabels={modelOptionsWithLabels}
+                    draftToolsEnabled={draftToolsEnabled}
+                    onDraftToolsEnabledChange={setDraftToolsEnabled}
+                    draftSystemPrompt={draftSystemPrompt}
+                    onDraftSystemPromptChange={setDraftSystemPrompt}
+                    draftMemory={draftMemory}
+                    onDraftMemoryChange={setDraftMemory}
+                    selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
+                    activeCampPath={activeCampSummary?.path ?? null}
+                  />
+                ) : null}
+
+                <details className="request-preview">
+                  <summary>Request Preview</summary>
+                  <pre>{lastRequestPreview ? JSON.stringify(lastRequestPreview, null, 2) : 'No request yet.'}</pre>
+                </details>
               </div>
 
-              <div className="artifact-scroll">
-                {globalContextFiles.map((path) => {
-                  const isAttached = attachedContextFiles.includes(path);
+              <div className="basecamp-composer-col">
 
-                  return (
-                    <article key={path} className="artifact-item camp-context-item">
-                      <header>
-                        <strong>{path}</strong>
+                <form className="composer" onSubmit={handleSendMessage}>
+                  {selectedCamp ? (
+                    <details className="artifact-drawer composer-artifact-drawer">
+                      <summary>
+                        {selectedArtifactIds.length > 0
+                          ? `${selectedArtifactIds.length} artifact${selectedArtifactIds.length === 1 ? '' : 's'} selected`
+                          : 'Include artifacts'}
+                      </summary>
+
+                      <label>
+                        <span>Search</span>
+                        <input
+                          value={artifactQuery}
+                          onChange={(event) => setArtifactQuery(event.target.value)}
+                          placeholder="title or tag"
+                        />
+                      </label>
+
+                      <div className="artifact-scroll">
+                        {visibleArtifacts.map((artifact) => (
+                          <article key={artifact.id} className="artifact-item">
+                            <header>
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedArtifactIds.includes(artifact.id)}
+                                  onChange={() => toggleArtifactSelection(artifact.id)}
+                                />
+                                <strong>{artifact.title}</strong>
+                              </label>
+                              <time>{new Date(artifact.updated_at).toLocaleString()}</time>
+                            </header>
+                            <p>{artifact.tags.join(', ')}</p>
+                          </article>
+                        ))}
+                        {visibleArtifacts.length === 0 ? <p className="hint">No artifacts yet.</p> : null}
+                      </div>
+                    </details>
+                  ) : null}
+
+                  {selectedArtifactsForComposer.length > 0 ? (
+                    <div className="artifact-chip-row">
+                      {selectedArtifactsForComposer.map((artifact) => (
                         <button
                           type="button"
-                          className={isAttached ? '' : 'primary-action'}
-                          disabled={isMutatingContext}
-                          onClick={() => {
-                            if (isAttached) {
-                              void handleDetachContext(path);
-                              return;
-                            }
-                            void handleAttachContext(path);
-                          }}
+                          key={`pending-${artifact.id}`}
+                          className="artifact-chip selectable"
+                          onClick={() => removeSelectedArtifact(artifact.id)}
                         >
-                          {isAttached ? 'Detach' : 'Attach'}
+                          {artifact.title}
                         </button>
-                      </header>
-                    </article>
-                  );
-                })}
-                {globalContextFiles.length === 0 ? <p className="hint">No files found in workspace `context/`.</p> : null}
-              </div>
-            </details>
-          ) : null}
+                      ))}
+                    </div>
+                  ) : null}
 
-          {selectedCamp ? (
-            <CampSettingsPanel
-              draftName={draftName}
-              onDraftNameChange={setDraftName}
-              draftModelQuery={draftModelQuery}
-              onDraftModelQueryChange={setDraftModelQuery}
-              draftModel={draftModel}
-              onDraftModelChange={setDraftModel}
-              filteredDraftModelOptions={filteredDraftModelOptions}
-              modelOptionsWithLabels={modelOptionsWithLabels}
-              draftToolsEnabled={draftToolsEnabled}
-              onDraftToolsEnabledChange={setDraftToolsEnabled}
-              draftSystemPrompt={draftSystemPrompt}
-              onDraftSystemPromptChange={setDraftSystemPrompt}
-              draftMemory={draftMemory}
-              onDraftMemoryChange={setDraftMemory}
-              selectedDraftModelContextLength={selectedDraftModel?.context_length ?? null}
-              activeCampPath={activeCampSummary?.path ?? null}
-            />
-          ) : null}
+                  <label>
+                    <span>Message</span>
+                    <textarea
+                      ref={composerTextareaRef}
+                      value={userMessage}
+                      onChange={(event) => setUserMessage(event.target.value)}
+                      onKeyDown={handleComposerKeyDown}
+                      rows={6}
+                      placeholder={selectedCamp ? 'Ask for planning, analysis, or drafting help...' : 'Create or select a camp first'}
+                      disabled={!selectedCamp}
+                      autoFocus
+                    />
+                  </label>
 
-          <details className="request-preview">
-            <summary>Request Preview</summary>
-            <pre>{lastRequestPreview ? JSON.stringify(lastRequestPreview, null, 2) : 'No request yet.'}</pre>
-          </details>
-        </section>
-
-        <section className="panel ide-pane ide-chat">
-          <div className="panel-header chat-header">
-            <div>
-              <h2>Chat</h2>
-              <p className="hint">{selectedCamp ? draftName : 'Create one on the left to start chatting.'}</p>
-            </div>
-
-            {selectedCamp ? (
-              <div style={{ textAlign: 'right' }}>
-                <label className="chat-model-picker">
-                  <span>Agent Model (Locked To Camp)</span>
-                  <select value={draftModel} onChange={(event) => setDraftModel(event.target.value)}>
-                    {(filteredDraftModelOptions.length > 0 ? filteredDraftModelOptions : modelOptionsWithLabels).map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {resolvedModel && resolvedModel !== draftModel && (
-                  <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
-                    Resolved: {resolvedModel}
-                  </div>
-                )}
-                {sessionTokens > 0 && (
-                  <div className="hint" style={{ marginTop: 'var(--space-1)' }}>
-                    {sessionTokens.toLocaleString()} tokens
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </div>
-
-          <TranscriptView
-            selectedCamp={selectedCamp}
-            streamingText={streamingText}
-            artifactById={artifactById}
-            isSending={isSending}
-            promotingMessageId={promotingMessageId}
-            onPromoteMessageToArtifact={(message) => {
-              void handlePromoteMessageToArtifact(message);
-            }}
-          />
-
-          <form className="composer" onSubmit={handleSendMessage}>
-            {selectedCamp ? (
-              <details className="artifact-drawer composer-artifact-drawer">
-                <summary>
-                  {selectedArtifactIds.length > 0
-                    ? `${selectedArtifactIds.length} artifact${selectedArtifactIds.length === 1 ? '' : 's'} selected`
-                    : 'Include artifacts'}
-                </summary>
-
-                <label>
-                  <span>Search</span>
-                  <input
-                    value={artifactQuery}
-                    onChange={(event) => setArtifactQuery(event.target.value)}
-                    placeholder="title or tag"
-                  />
-                </label>
-
-                <div className="artifact-scroll">
-                  {visibleArtifacts.map((artifact) => (
-                    <article key={artifact.id} className="artifact-item">
-                      <header>
+                  <div className="composer-actions">
+                    <details className="composer-tuning">
+                      <summary>Model Controls</summary>
+                      <div className="composer-controls">
                         <label>
+                          <span>Temperature</span>
                           <input
-                            type="checkbox"
-                            checked={selectedArtifactIds.includes(artifact.id)}
-                            onChange={() => toggleArtifactSelection(artifact.id)}
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={temperature}
+                            onChange={(event) => setTemperature(Number(event.target.value))}
                           />
-                          <strong>{artifact.title}</strong>
                         </label>
-                        <time>{new Date(artifact.updated_at).toLocaleString()}</time>
-                      </header>
-                      <p>{artifact.tags.join(', ')}</p>
-                    </article>
-                  ))}
-                  {visibleArtifacts.length === 0 ? <p className="hint">No artifacts yet.</p> : null}
-                </div>
-              </details>
-            ) : null}
 
-            {selectedArtifactsForComposer.length > 0 ? (
-              <div className="artifact-chip-row">
-                {selectedArtifactsForComposer.map((artifact) => (
-                  <button
-                    type="button"
-                    key={`pending-${artifact.id}`}
-                    className="artifact-chip selectable"
-                    onClick={() => removeSelectedArtifact(artifact.id)}
-                  >
-                    {artifact.title}
-                  </button>
-                ))}
+                        <label>
+                          <span>Max Tokens</span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={maxTokens}
+                            onChange={(event) => setMaxTokens(Math.max(1, Math.floor(Number(event.target.value))))}
+                          />
+                        </label>
+                      </div>
+                    </details>
+                    <div className="composer-orchestrate-actions">
+                      <button type="submit" className="primary-action" disabled={isSending || !selectedCamp}>
+                        {isSending ? 'Generating...' : 'Send Message'}
+                      </button>
+                      {status && status.includes('Response') ? <p className="status-line basecamp-inline-status">{status}</p> : null}
+                    </div>
+                  </div>
+                </form>
               </div>
-            ) : null}
-
-            <label>
-              <span>Message</span>
-              <textarea
-                ref={composerTextareaRef}
-                value={userMessage}
-                onChange={(event) => setUserMessage(event.target.value)}
-                onKeyDown={handleComposerKeyDown}
-                rows={6}
-                placeholder={selectedCamp ? 'Ask for planning, analysis, or drafting help...' : 'Create or select a camp first'}
-                disabled={!selectedCamp}
-                autoFocus
-              />
-            </label>
-
-            <div className="composer-actions">
-              <details className="composer-tuning">
-                <summary>Model Controls</summary>
-                <div className="composer-controls">
-                  <label>
-                    <span>Temperature</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      value={temperature}
-                      onChange={(event) => setTemperature(Number(event.target.value))}
-                    />
-                  </label>
-
-                  <label>
-                    <span>Max Tokens</span>
-                    <input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={maxTokens}
-                      onChange={(event) => setMaxTokens(Math.max(1, Math.floor(Number(event.target.value))))}
-                    />
-                  </label>
-                </div>
-              </details>
-              <button type="submit" className="primary-action" disabled={isSending || !selectedCamp}>
-                {isSending ? 'Generating...' : 'Send Message'}
-              </button>
             </div>
-          </form>
-        </section>
+          </Panel>
+        </PanelGroup>
       </main>
     </div>
   );
 }
+

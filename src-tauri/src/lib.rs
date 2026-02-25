@@ -3,6 +3,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
     sync::Mutex,
+    time::Duration,
 };
 
 use keyring::{Entry, Error as KeyringError};
@@ -2640,6 +2641,25 @@ fn tauri_cmd_write_context_file(
 }
 
 #[tauri::command]
+fn camp_delete(state: State<'_, AppState>, camp_id: String) -> Result<(), String> {
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = camps_root.join(&camp_id);
+
+    if !camp_dir.exists() {
+        return Err("Camp not found".to_string());
+    }
+
+    fs::remove_dir_all(&camp_dir).map_err(|e| format!("Failed to delete camp directory: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
 fn camp_list(state: State<'_, AppState>) -> Result<Vec<CampSummary>, String> {
     let connection = state
         .connection
@@ -3054,6 +3074,20 @@ pub fn run() {
             app.manage(AppState {
                 connection: Mutex::new(connection),
             });
+
+            // Handle the splash screen
+            let splash_window = app.get_webview_window("splashscreen").unwrap();
+            let main_window = app.get_webview_window("main").unwrap();
+
+            tauri::async_runtime::spawn(async move {
+                // Keep the splash screen open for a bit
+                std::thread::sleep(Duration::from_millis(2500));
+                
+                // Then show the main app
+                splash_window.close().unwrap();
+                main_window.show().unwrap();
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3088,6 +3122,7 @@ pub fn run() {
             tauri_cmd_read_context_file,
             tauri_cmd_list_context_files,
             tauri_cmd_write_context_file,
+            camp_delete,
             camp_list,
             camp_create,
             camp_load,

@@ -6,6 +6,7 @@ type CampCardProps = {
   camp: CampSummary;
   promptPreview: string;
   onOpen: () => void;
+  onDelete?: () => void;
 };
 
 function formatRelativeTime(ts: number): string {
@@ -52,9 +53,26 @@ export function CampCard(props: CampCardProps) {
       aria-label={`Open ${props.camp.name}`}
     >
       <header className="camp-card-header">
-        <div className="camp-card-title">
-          <h3>{props.camp.name}</h3>
-          <p>{props.camp.model}</p>
+        <div className="camp-card-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', width: '100%' }}>
+          <div>
+            <h3>{props.camp.name}</h3>
+            <p>{props.camp.model}</p>
+          </div>
+          {props.onDelete && (
+            <button
+              type="button"
+              className="delete-action"
+              style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-1) var(--space-2)' }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                props.onDelete?.();
+              }}
+              aria-label={`Delete ${props.camp.name}`}
+            >
+              Delete
+            </button>
+          )}
         </div>
         <time dateTime={new Date(props.camp.updated_at).toISOString()}>{formatRelativeTime(props.camp.updated_at)}</time>
       </header>
