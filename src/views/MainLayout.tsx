@@ -16,7 +16,10 @@ import {
   campListArtifacts,
   campLoad,
   campReadContextFile,
+  campSearchTranscript,
   campUpdateConfig,
+  campUpdateArtifact,
+  campUpdateMemory,
   campUpdateSystemPrompt,
   campWriteContextFile,
   dbListModels,
@@ -28,7 +31,7 @@ import {
 import { runCampChatRuntime } from '../lib/campChatRuntime';
 import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
-import { executeFilesystemToolCall, FILESYSTEM_TOOLS } from '../lib/tools';
+import { CAMP_TOOLS, executeCampToolCall, getToolKind } from '../lib/tools';
 import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
@@ -58,10 +61,15 @@ type MutableContextTreeNode = {
 
 type ToolApprovalDecision = 'approve' | 'reject';
 type ToolApprovalStatus = 'pending' | 'approved' | 'running' | 'rejected' | 'done' | 'error';
+type ToolApprovalMode = 'manual' | 'auto-safe';
+type ToolQueueItemKind = 'read' | 'mutate' | 'unknown';
+
+const TOOL_APPROVAL_MODE: ToolApprovalMode = 'manual';
 
 type ToolApprovalItem = {
   id: string;
   name: string;
+  kind: ToolQueueItemKind;
   argsJson: string;
   status: ToolApprovalStatus;
   resultPreview: string | null;
@@ -75,6 +83,14 @@ function truncatePreview(value: string, maxLength = 160): string {
   }
 
   return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function shouldRequireToolApproval(mode: ToolApprovalMode, kind: ToolQueueItemKind): boolean {
+  if (mode === 'manual') {
+    return true;
+  }
+
+  return kind !== 'read';
 }
 
 function buildContextTree(paths: string[]): ContextTreeNode[] {
@@ -420,34 +436,75 @@ export function MainLayout() {
       toolCall: OpenRouterToolCall & { id: string },
     ): Promise<string> => {
       const argsJson = toolCall.function.arguments ?? '{}';
-      const pendingItem: ToolApprovalItem = {
+      const toolKind = getToolKind(toolCall.function.name) ?? 'unknown';
+      const requiresApproval = shouldRequireToolApproval(TOOL_APPROVAL_MODE, toolKind);
+      const initialItem: ToolApprovalItem = {
         id: toolCall.id,
         name: toolCall.function.name,
+        kind: toolKind,
         argsJson,
-        status: 'pending',
+        status: requiresApproval ? 'pending' : 'running',
         resultPreview: null,
         errorMessage: null,
         createdAt: Date.now(),
       };
-      upsertToolApprovalItem(pendingItem);
+      upsertToolApprovalItem(initialItem);
 
-      const decision = await new Promise<ToolApprovalDecision>((resolve) => {
-        toolApprovalResolversRef.current.set(toolCall.id, resolve);
-      });
+      if (requiresApproval) {
+        const decision = await new Promise<ToolApprovalDecision>((resolve) => {
+          toolApprovalResolversRef.current.set(toolCall.id, resolve);
+        });
 
-      if (decision === 'reject') {
-        return JSON.stringify({ error: TOOL_REJECT_MESSAGE });
+        if (decision === 'reject') {
+          return JSON.stringify({ error: TOOL_REJECT_MESSAGE });
+        }
+
+        setToolApprovalQueue((previous) =>
+          previous.map((item) => (item.id === toolCall.id ? { ...item, status: 'running' } : item)),
+        );
       }
 
-      setToolApprovalQueue((previous) =>
-        previous.map((item) => (item.id === toolCall.id ? { ...item, status: 'running' } : item)),
-      );
-
       try {
-        const toolResult = await executeFilesystemToolCall(toolCall, {
+        const toolResult = await executeCampToolCall(toolCall, {
           readFile: async (path) => campReadContextFile(campId, path),
           listFiles: async (path) => campListContextFiles(campId, path),
           writeFile: async (path, content) => campWriteContextFile(campId, path, content),
+          listArtifacts: async () => campListArtifacts(campId),
+          getArtifact: async (artifactId) => campGetArtifact(campId, artifactId),
+          createArtifact: async ({ sourceMessageId, title, tags }) =>
+            campCreateArtifactFromMessage({
+              camp_id: campId,
+              message_id: sourceMessageId,
+              title,
+              tags,
+            }),
+          updateArtifact: async ({ artifactId, title, body, tags }) =>
+            campUpdateArtifact({
+              camp_id: campId,
+              artifact_id: artifactId,
+              title,
+              body,
+              tags,
+            }),
+          searchTranscript: async ({ query, limit, roles }) =>
+            campSearchTranscript(campId, {
+              query,
+              limit,
+              roles,
+            }),
+          updateCampPrompt: async (systemPrompt) => {
+            await campUpdateSystemPrompt({
+              camp_id: campId,
+              system_prompt: systemPrompt,
+            });
+            setDraftSystemPrompt(systemPrompt);
+          },
+          updateCampMemory: async (memory) => {
+            await campUpdateMemory({
+              camp_id: campId,
+              memory,
+            });
+          },
         });
 
         setToolApprovalQueue((previous) =>
@@ -712,7 +769,7 @@ export function MainLayout() {
           onToken: (token) => {
             setStreamingText((previous) => previous + token);
           },
-          tools: FILESYSTEM_TOOLS,
+          tools: CAMP_TOOLS,
           executeToolCall: async ({ campId, toolCall }) => {
             return executeToolCallWithApproval(campId, toolCall);
           },
@@ -1035,6 +1092,7 @@ export function MainLayout() {
                 <article key={item.id} className={`tool-queue-item ${item.status}`}>
                   <header>
                     <strong>{item.name}</strong>
+                    <span>{item.kind}</span>
                     <span>{item.status}</span>
                   </header>
                   <p className="tool-queue-args">{item.argsJson}</p>

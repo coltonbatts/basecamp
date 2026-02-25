@@ -180,6 +180,8 @@ export type CampMessage = {
   included_artifact_ids?: string[];
 };
 
+export type CampMessageRole = CampMessage['role'];
+
 export type CampToolCall = {
   id: string;
   type: 'function';
@@ -220,6 +222,22 @@ export type CampUpdateSystemPromptPayload = {
 export type CampUpdateMemoryPayload = {
   camp_id: string;
   memory: unknown;
+};
+
+export type CampSearchTranscriptPayload = {
+  query: string;
+  limit?: number;
+  roles?: CampMessageRole[];
+};
+
+export type CampTranscriptSearchMatch = {
+  id: string;
+  role: CampMessageRole;
+  created_at: number;
+  excerpt: string;
+  match_count: number;
+  name?: string;
+  tool_call_id?: string;
 };
 
 export type CampAppendMessagePayload = {

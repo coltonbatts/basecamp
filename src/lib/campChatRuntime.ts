@@ -133,7 +133,7 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
   });
 
   if (tools && !input.executeToolCall) {
-    throw new Error('Filesystem tool executor is not configured.');
+    throw new Error('Tool executor is not configured.');
   }
 
   if (tools && input.executeToolCall) {
@@ -182,4 +182,3 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
     resolvedModel: streamed.resolvedModel,
   };
 }
-

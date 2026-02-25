@@ -1,142 +1,159 @@
 import type { OpenRouterToolCall, OpenRouterToolSpec } from './openrouter';
+import type { CampArtifact, CampArtifactMetadata, CampTranscriptSearchMatch } from './types';
+import {
+  campCreateArtifactArgsSchema,
+  campGetArtifactArgsSchema,
+  campListArtifactsArgsSchema,
+  campListFilesArgsSchema,
+  campReadFileArgsSchema,
+  campSearchTranscriptArgsSchema,
+  campToolSpecs,
+  campUpdateArtifactArgsSchema,
+  campUpdateMemoryArgsSchema,
+  campUpdatePromptArgsSchema,
+  campWriteFileArgsSchema,
+  getCampToolKind,
+  isCampToolName,
+  parseToolArguments,
+  type ToolKind,
+} from './tools/registry';
 
-export const FILESYSTEM_TOOLS: OpenRouterToolSpec[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: "Read the contents of a file from the current Camp's context directory.",
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: "Relative path to the file within the Camp context directory.",
-          },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'list_files',
-      description: "List files in the Camp's context directory or a subdirectory of it.",
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Optional relative path to a subdirectory. Defaults to the root context directory.',
-          },
-        },
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_file',
-      description: "Write or overwrite a file in the Camp's context directory.",
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: "Relative path to the file within the Camp context directory.",
-          },
-          content: {
-            type: 'string',
-            description: 'The full content to write to the file.',
-          },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-];
-
-type FilesystemToolName = 'read_file' | 'list_files' | 'write_file';
-
-type FilesystemToolHandlers = {
+export type CampToolHandlers = {
   readFile: (path: string) => Promise<string>;
   listFiles: (path?: string) => Promise<string[]>;
   writeFile: (path: string, content: string) => Promise<void>;
+  listArtifacts: () => Promise<CampArtifactMetadata[]>;
+  getArtifact: (artifactId: string) => Promise<CampArtifact>;
+  createArtifact: (input: { sourceMessageId: string; title?: string; tags?: string[] }) => Promise<CampArtifact>;
+  updateArtifact: (input: { artifactId: string; title?: string; body?: string; tags?: string[] }) => Promise<CampArtifact>;
+  searchTranscript: (input: {
+    query: string;
+    limit: number;
+    roles?: Array<'system' | 'user' | 'assistant' | 'tool'>;
+  }) => Promise<CampTranscriptSearchMatch[]>;
+  updateCampPrompt: (systemPrompt: string) => Promise<void>;
+  updateCampMemory: (memory: Record<string, unknown>) => Promise<void>;
 };
 
-function parseArgumentObject(rawArguments: string): Record<string, unknown> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawArguments);
-  } catch (error) {
-    throw new Error(`Tool arguments must be valid JSON: ${error instanceof Error ? error.message : 'parse error'}`);
-  }
+export const CAMP_TOOLS: OpenRouterToolSpec[] = campToolSpecs;
+export const FILESYSTEM_TOOLS: OpenRouterToolSpec[] = campToolSpecs.filter((tool) =>
+  tool.function.name === 'read_file' ||
+  tool.function.name === 'list_files' ||
+  tool.function.name === 'write_file'
+);
 
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Tool arguments must be a JSON object.');
-  }
-
-  return parsed as Record<string, unknown>;
+function toJsonString(value: unknown): string {
+  return JSON.stringify(value);
 }
 
-function readRequiredStringArg(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`Tool argument "${key}" must be a non-empty string.`);
-  }
-
-  return value;
+function byteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
 }
 
-function readOptionalStringArg(args: Record<string, unknown>, key: string): string | undefined {
-  const value = args[key];
-  if (value === undefined || value === null) {
-    return undefined;
-  }
+function normalizeArtifactRows(rows: CampArtifactMetadata[]): CampArtifactMetadata[] {
+  return [...rows].sort((left, right) => {
+    if (left.created_at !== right.created_at) {
+      return left.created_at - right.created_at;
+    }
 
-  if (typeof value !== 'string') {
-    throw new Error(`Tool argument "${key}" must be a string when provided.`);
-  }
-
-  return value;
+    return left.id.localeCompare(right.id);
+  });
 }
 
-function assertFilesystemToolName(name: string): FilesystemToolName {
-  if (name === 'read_file' || name === 'list_files' || name === 'write_file') {
-    return name;
-  }
-
-  throw new Error(`Unsupported filesystem tool: ${name}`);
+export function getToolKind(name: string): ToolKind | null {
+  return getCampToolKind(name);
 }
 
-export async function executeFilesystemToolCall(
+export async function executeCampToolCall(
   toolCall: OpenRouterToolCall,
-  handlers: FilesystemToolHandlers,
+  handlers: CampToolHandlers,
 ): Promise<string> {
-  const toolName = assertFilesystemToolName(toolCall.function.name);
-  const args = parseArgumentObject(toolCall.function.arguments ?? '{}');
+  if (!isCampToolName(toolCall.function.name)) {
+    throw new Error(`Unsupported tool: ${toolCall.function.name}`);
+  }
 
-  switch (toolName) {
+  const rawArgs = parseToolArguments(toolCall.function.arguments ?? '{}');
+
+  switch (toolCall.function.name) {
     case 'read_file': {
-      const path = readRequiredStringArg(args, 'path');
-      const content = await handlers.readFile(path);
-      return JSON.stringify({ path, content });
+      const args = campReadFileArgsSchema.parse(rawArgs);
+      const content = await handlers.readFile(args.path);
+      return toJsonString({ path: args.path, content });
     }
     case 'list_files': {
-      const path = readOptionalStringArg(args, 'path');
-      const files = await handlers.listFiles(path);
-      return JSON.stringify({ path: path ?? '', files });
+      const args = campListFilesArgsSchema.parse(rawArgs);
+      const normalizedPath = args.path.trim();
+      const files = await handlers.listFiles(normalizedPath || undefined);
+      return toJsonString({ path: normalizedPath, files });
     }
     case 'write_file': {
-      const path = readRequiredStringArg(args, 'path');
-      const content = readRequiredStringArg(args, 'content');
-      await handlers.writeFile(path, content);
-      return JSON.stringify({ path, bytes_written: new TextEncoder().encode(content).length });
+      const args = campWriteFileArgsSchema.parse(rawArgs);
+      await handlers.writeFile(args.path, args.content);
+      return toJsonString({ path: args.path, bytes_written: byteLength(args.content) });
+    }
+    case 'list_artifacts': {
+      const args = campListArtifactsArgsSchema.parse(rawArgs);
+      const artifacts = normalizeArtifactRows(await handlers.listArtifacts()).filter(
+        (artifact) => args.include_archived || !artifact.archived,
+      );
+      return toJsonString({
+        include_archived: args.include_archived,
+        artifacts,
+      });
+    }
+    case 'get_artifact': {
+      const args = campGetArtifactArgsSchema.parse(rawArgs);
+      const artifact = await handlers.getArtifact(args.artifact_id);
+      return toJsonString({ artifact });
+    }
+    case 'create_artifact': {
+      const args = campCreateArtifactArgsSchema.parse(rawArgs);
+      const artifact = await handlers.createArtifact({
+        sourceMessageId: args.source_message_id,
+        title: args.title,
+        tags: args.tags,
+      });
+      return toJsonString({ artifact });
+    }
+    case 'update_artifact': {
+      const args = campUpdateArtifactArgsSchema.parse(rawArgs);
+      const artifact = await handlers.updateArtifact({
+        artifactId: args.artifact_id,
+        title: args.title,
+        body: args.body,
+        tags: args.tags,
+      });
+      return toJsonString({ artifact });
+    }
+    case 'search_transcript': {
+      const args = campSearchTranscriptArgsSchema.parse(rawArgs);
+      const matches = await handlers.searchTranscript({
+        query: args.query,
+        limit: args.limit,
+        roles: args.roles,
+      });
+      return toJsonString({
+        query: args.query,
+        limit: args.limit,
+        roles: args.roles ?? [],
+        matches,
+      });
+    }
+    case 'update_camp_prompt': {
+      const args = campUpdatePromptArgsSchema.parse(rawArgs);
+      await handlers.updateCampPrompt(args.system_prompt);
+      return toJsonString({ updated: true, system_prompt_bytes: byteLength(args.system_prompt) });
+    }
+    case 'update_camp_memory': {
+      const args = campUpdateMemoryArgsSchema.parse(rawArgs);
+      await handlers.updateCampMemory(args.memory);
+      return toJsonString({
+        updated: true,
+        memory_keys: Object.keys(args.memory).sort((left, right) => left.localeCompare(right)),
+      });
     }
     default: {
-      throw new Error(`Unhandled filesystem tool: ${toolName}`);
+      throw new Error(`Unhandled tool: ${toolCall.function.name}`);
     }
   }
 }

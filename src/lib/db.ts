@@ -8,7 +8,9 @@ import type {
   CampCreateArtifactFromMessagePayload,
   CampCreatePayload,
   CampMessage,
+  CampSearchTranscriptPayload,
   CampSummary,
+  CampTranscriptSearchMatch,
   CampToggleArtifactArchivePayload,
   CampUpdateConfigPayload,
   CampUpdateArtifactPayload,
@@ -141,6 +143,104 @@ export async function campCreate(payload: CampCreatePayload): Promise<Camp> {
 
 export async function campLoad(campId: string): Promise<Camp> {
   return invoke<Camp>('camp_load', { campId });
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) {
+    return 0;
+  }
+
+  let count = 0;
+  let cursor = 0;
+  while (cursor < haystack.length) {
+    const index = haystack.indexOf(needle, cursor);
+    if (index === -1) {
+      break;
+    }
+
+    count += 1;
+    cursor = index + Math.max(needle.length, 1);
+  }
+
+  return count;
+}
+
+function buildTranscriptExcerpt(content: string, normalizedNeedle: string, maxLength = 220): string {
+  const normalizedContent = content.replace(/\s+/g, ' ').trim();
+  if (normalizedContent.length <= maxLength) {
+    return normalizedContent;
+  }
+
+  const lowerContent = normalizedContent.toLowerCase();
+  const firstMatchIndex = lowerContent.indexOf(normalizedNeedle);
+  if (firstMatchIndex === -1) {
+    return `${normalizedContent.slice(0, maxLength - 3)}...`;
+  }
+
+  const start = Math.max(0, firstMatchIndex - 80);
+  const end = Math.min(normalizedContent.length, start + maxLength);
+  const prefix = start > 0 ? '...' : '';
+  const suffix = end < normalizedContent.length ? '...' : '';
+  return `${prefix}${normalizedContent.slice(start, end)}${suffix}`;
+}
+
+export async function campSearchTranscript(
+  campId: string,
+  payload: CampSearchTranscriptPayload,
+): Promise<CampTranscriptSearchMatch[]> {
+  const normalizedQuery = payload.query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const normalizedLimit = Math.min(Math.max(payload.limit ?? 10, 1), 50);
+  const roleFilter = payload.roles && payload.roles.length > 0 ? new Set(payload.roles) : null;
+
+  const camp = await campLoad(campId);
+  const matches: CampTranscriptSearchMatch[] = [];
+
+  for (const message of camp.transcript) {
+    if (roleFilter && !roleFilter.has(message.role)) {
+      continue;
+    }
+
+    const matchCount = countOccurrences(message.content.toLowerCase(), normalizedQuery);
+    if (matchCount === 0) {
+      continue;
+    }
+
+    const nextMatch: CampTranscriptSearchMatch = {
+      id: message.id,
+      role: message.role,
+      created_at: message.created_at,
+      excerpt: buildTranscriptExcerpt(message.content, normalizedQuery),
+      match_count: matchCount,
+    };
+
+    if (message.name !== undefined) {
+      nextMatch.name = message.name;
+    }
+
+    if (message.tool_call_id !== undefined) {
+      nextMatch.tool_call_id = message.tool_call_id;
+    }
+
+    matches.push(nextMatch);
+  }
+
+  matches.sort((left, right) => {
+    if (left.match_count !== right.match_count) {
+      return right.match_count - left.match_count;
+    }
+
+    if (left.created_at !== right.created_at) {
+      return right.created_at - left.created_at;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+
+  return matches.slice(0, normalizedLimit);
 }
 
 export async function campUpdateConfig(payload: CampUpdateConfigPayload): Promise<void> {
