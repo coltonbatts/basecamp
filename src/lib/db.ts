@@ -287,6 +287,10 @@ export async function campReadContextFile(campId: string, path: string): Promise
   return invoke<string>('tauri_cmd_read_context_file', { campId, path });
 }
 
+export async function campReadContextFileBase64(campId: string, path: string): Promise<string> {
+  return invoke<string>('tauri_cmd_read_context_file_base64', { campId, path });
+}
+
 export async function workspaceListContextFiles(): Promise<string[]> {
   return invoke<string[]>('workspace_list_context_files');
 }
@@ -339,4 +343,8 @@ export async function setMaxIterations(value: number): Promise<void> {
 
 export async function getMaxIterations(): Promise<number> {
   return invoke<number>('get_max_iterations');
+}
+
+export async function campWriteContextFileBytes(campId: string, path: string, contentBase64: string): Promise<void> {
+  await invoke('tauri_cmd_write_context_file_bytes', { campId, path, contentBase64 });
 }

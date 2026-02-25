@@ -156,6 +156,20 @@ struct CampMessage {
     tool_calls: Option<Vec<CampToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     included_artifact_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attachments: Option<Vec<CampMessageAttachment>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum CampMessageAttachment {
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlPayload },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImageUrlPayload {
+    url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -313,6 +327,7 @@ struct CampAppendMessagePayload {
     tool_call_id: Option<String>,
     tool_calls: Option<Vec<CampToolCall>>,
     included_artifact_ids: Option<Vec<String>>,
+    attachments: Option<Vec<CampMessageAttachment>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1617,6 +1632,7 @@ fn parse_loaded_transcript_message(
         tool_call_id,
         tool_calls,
         included_artifact_ids,
+        attachments: None,
     })
 }
 
@@ -3443,6 +3459,32 @@ fn tauri_cmd_read_context_file(
 }
 
 #[tauri::command]
+fn tauri_cmd_read_context_file_base64(
+    window: Window,
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+) -> Result<String, String> {
+    ensure_main_window(&window)?;
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let target = resolve_existing_context_target(&context_root, &path, "path", false)?;
+
+    if !target.is_file() {
+        return Err("Requested path is not a file.".to_string());
+    }
+
+    use base64::{Engine as _, engine::general_purpose};
+    let bytes = fs::read(&target).map_err(|err| format!("Unable to read binary context file: {err}"))?;
+    Ok(general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command]
 fn tauri_cmd_list_context_files(
     window: Window,
     state: State<'_, AppState>,
@@ -3511,6 +3553,43 @@ fn tauri_cmd_write_context_file(
     }
 
     fs::write(&target, content).map_err(|err| format!("Unable to write context file: {err}"))?;
+    touch_camp_updated_at(&camp_dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn tauri_cmd_write_context_file_bytes(
+    window: Window,
+    state: State<'_, AppState>,
+    camp_id: String,
+    path: String,
+    content_base64: String,
+) -> Result<(), String> {
+    ensure_main_window(&window)?;
+    let connection = state
+        .connection
+        .lock()
+        .map_err(|_| "Database lock error".to_string())?;
+    let camps_root = ensure_camps_root(&connection)?;
+    let camp_dir = resolve_existing_camp_dir(&camps_root, &camp_id)?;
+    let context_root = canonicalize_context_root(&camp_context_dir(&camp_dir))?;
+    let target = resolve_write_context_target(&context_root, &path)?;
+
+    if target.exists() {
+        let canonical_target = fs::canonicalize(&target)
+            .map_err(|err| format!("Unable to resolve destination path: {err}"))?;
+        ensure_path_within_root(&context_root, &canonical_target)?;
+        if canonical_target.is_dir() {
+            return Err("Requested path is a directory.".to_string());
+        }
+    }
+
+    use base64::{Engine as _, engine::general_purpose};
+    let bytes = general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|err| format!("Invalid base64 encoding: {err}"))?;
+
+    fs::write(&target, bytes).map_err(|err| format!("Unable to write binary context file: {err}"))?;
     touch_camp_updated_at(&camp_dir)?;
     Ok(())
 }
@@ -3731,6 +3810,11 @@ fn camp_append_message(
     } else {
         None
     };
+    let attachments = if role == "user" {
+        payload.attachments
+    } else {
+        None
+    };
     let message = CampMessage {
         id: Uuid::new_v4().to_string(),
         role,
@@ -3740,6 +3824,7 @@ fn camp_append_message(
         tool_call_id,
         tool_calls,
         included_artifact_ids,
+        attachments,
     };
 
     append_transcript_message(&camp_transcript_path(&camp_dir), &message)?;
@@ -4232,8 +4317,10 @@ pub fn run() {
             camp_attach_workspace_context_file,
             camp_detach_workspace_context_file,
             tauri_cmd_read_context_file,
+            tauri_cmd_read_context_file_base64,
             tauri_cmd_list_context_files,
             tauri_cmd_write_context_file,
+            tauri_cmd_write_context_file_bytes,
             camp_delete,
             camp_list,
             camp_create,

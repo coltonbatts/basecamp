@@ -189,6 +189,7 @@ export const campListFilesArgsSchema = z.object({
 export const campWriteFileArgsSchema = z.object({
   path: z.string().trim().min(1),
   content: z.string(),
+  encoding: z.enum(['utf-8', 'base64']).optional().default('utf-8'),
 }).strict();
 
 export const campListArtifactsArgsSchema = z.object({
@@ -292,7 +293,7 @@ const CAMP_TOOL_DEFINITIONS: Record<CampToolName, CampToolDefinition> = {
       type: 'function',
       function: {
         name: 'write_file',
-        description: "Write or overwrite a file in the Camp's context directory.",
+        description: "Write or overwrite a file in the Camp's context directory. MUST be used for generating files like images or PDFs instead of outputting raw text dumps.",
         parameters: {
           type: 'object',
           properties: {
@@ -302,7 +303,12 @@ const CAMP_TOOL_DEFINITIONS: Record<CampToolName, CampToolDefinition> = {
             },
             content: {
               type: 'string',
-              description: 'The full content to write to the file.',
+              description: 'The full content to write to the file. If binary like an image, provide the base64 encoded string.',
+            },
+            encoding: {
+              type: 'string',
+              enum: ['utf-8', 'base64'],
+              description: 'Text encoding. Use base64 for images and binary files.',
             },
           },
           required: ['path', 'content'],

@@ -85,9 +85,9 @@ export async function fetchOpenRouterKeyInfo(): Promise<OpenRouterKeyInfo['data'
   } catch (error) {
     const message =
       typeof error === 'object' &&
-      error !== null &&
-      'message' in error &&
-      typeof (error as { message?: unknown }).message === 'string'
+        error !== null &&
+        'message' in error &&
+        typeof (error as { message?: unknown }).message === 'string'
         ? (error as { message: string }).message
         : 'Failed to fetch OpenRouter key info.';
     throw new Error(message);
@@ -111,9 +111,13 @@ export type OpenRouterToolCall = {
   };
 };
 
+export type OpenRouterChatMessageContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export type OpenRouterChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content?: string | unknown[] | null;
+  content?: string | OpenRouterChatMessageContentPart[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: OpenRouterToolCall[];
@@ -522,7 +526,7 @@ export async function runOpenRouterChatCompletion(
   requestPayload: OpenRouterChatRequestPayload,
   options?: OpenRouterRequestOptions,
 ): Promise<OpenRouterChatRunResult> {
-  const { result } = await invokeOpenRouterCompletion(requestPayload, () => {}, options, false);
+  const { result } = await invokeOpenRouterCompletion(requestPayload, () => { }, options, false);
   const responsePayload = result.response_payload;
   const parsed = OpenRouterResponseSchema.safeParse(responsePayload);
   if (!parsed.success) {
@@ -602,7 +606,7 @@ export async function runToolUseLoop(
     const assistantText = normalizeMessageContent(completion.assistantMessage.content).trim();
     const assistantConversationMessage: OpenRouterChatMessage = {
       role: 'assistant',
-      content: completion.assistantMessage.content ?? assistantText,
+      content: (completion.assistantMessage.content as OpenRouterChatMessage['content']) ?? assistantText,
       tool_calls: normalizedToolCalls.length > 0 ? normalizedToolCalls : undefined,
     };
     const assistantTranscriptMessage: OpenRouterChatMessage = {

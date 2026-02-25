@@ -18,7 +18,6 @@ import {
   getMcpToolKind,
   getMcpToolSpecs,
   isCampToolName,
-  isMcpToolName,
   parseToolArguments,
   type ToolKind,
 } from './tools/registry';
@@ -26,7 +25,7 @@ import {
 export type CampToolHandlers = {
   readFile: (path: string) => Promise<string>;
   listFiles: (path?: string) => Promise<string[]>;
-  writeFile: (path: string, content: string) => Promise<void>;
+  writeFile: (path: string, content: string, encoding?: 'utf-8' | 'base64') => Promise<void>;
   listArtifacts: () => Promise<CampArtifactMetadata[]>;
   getArtifact: (artifactId: string) => Promise<CampArtifact>;
   createArtifact: (input: { sourceMessageId: string; title?: string; tags?: string[] }) => Promise<CampArtifact>;
@@ -138,7 +137,7 @@ export async function executeCampToolCall(
     }
     case 'write_file': {
       const args = campWriteFileArgsSchema.parse(rawArgs);
-      await handlers.writeFile(args.path, args.content);
+      await handlers.writeFile(args.path, args.content, args.encoding);
       return toJsonString({ path: args.path, bytes_written: byteLength(args.content) });
     }
     case 'list_artifacts': {

@@ -1,5 +1,5 @@
-import type { Camp, CampArtifact } from './types';
-import type { OpenRouterChatMessage, OpenRouterChatRequestPayload, OpenRouterToolSpec } from './openrouter';
+import type { Camp, CampArtifact, CampMessageAttachment } from './types';
+import type { OpenRouterChatMessage, OpenRouterChatMessageContentPart, OpenRouterChatRequestPayload, OpenRouterToolSpec } from './openrouter';
 
 const MAX_ARTIFACT_CHARS_PER_ITEM = 8_000;
 const MAX_ARTIFACT_CHARS_TOTAL = 40_000;
@@ -79,13 +79,28 @@ function normalizeTranscript(messages: Camp['transcript']): OpenRouterChatMessag
       continue;
     }
 
-    if (!trimmedContent) {
+    if (!trimmedContent && (!message.attachments || message.attachments.length === 0)) {
       continue;
+    }
+
+    let content: OpenRouterChatMessage['content'] = trimmedContent;
+
+    if (message.attachments && message.attachments.length > 0) {
+      const parts: OpenRouterChatMessageContentPart[] = [];
+      if (trimmedContent) {
+        parts.push({ type: 'text', text: trimmedContent });
+      }
+      for (const attachment of message.attachments) {
+        if (attachment.type === 'image_url') {
+          parts.push({ type: 'image_url', image_url: { url: attachment.image_url.url } });
+        }
+      }
+      content = parts;
     }
 
     normalized.push({
       role: message.role,
-      content: trimmedContent,
+      content,
     });
   }
 
@@ -156,6 +171,7 @@ function toArtifactSystemMessagesWithBreakdown(artifacts: CampArtifact[]): {
 function composeCampMessagesWithBreakdown(input: {
   camp: Camp;
   userMessage: string;
+  userAttachments?: CampMessageAttachment[];
   selectedArtifacts?: CampArtifact[];
 }): { messages: OpenRouterChatMessage[]; breakdown: ComposedInputBreakdown } {
   const messages: OpenRouterChatMessage[] = [];
@@ -180,10 +196,27 @@ function composeCampMessagesWithBreakdown(input: {
   messages.push(...transcriptMessages);
 
   const trimmedUserMessage = input.userMessage.trim();
-  if (trimmedUserMessage) {
+  const hasAttachments = input.userAttachments && input.userAttachments.length > 0;
+
+  if (trimmedUserMessage || hasAttachments) {
+    let content: OpenRouterChatMessage['content'] = trimmedUserMessage;
+
+    if (hasAttachments) {
+      const parts: OpenRouterChatMessageContentPart[] = [];
+      if (trimmedUserMessage) {
+        parts.push({ type: 'text', text: trimmedUserMessage });
+      }
+      for (const attachment of input.userAttachments!) {
+        if (attachment.type === 'image_url') {
+          parts.push({ type: 'image_url', image_url: { url: attachment.image_url.url } });
+        }
+      }
+      content = parts;
+    }
+
     messages.push({
       role: 'user',
-      content: trimmedUserMessage,
+      content,
     });
   }
 
@@ -206,6 +239,7 @@ function composeCampMessagesWithBreakdown(input: {
 export function composeCampMessages(input: {
   camp: Camp;
   userMessage: string;
+  userAttachments?: CampMessageAttachment[];
   selectedArtifacts?: CampArtifact[];
 }): OpenRouterChatMessage[] {
   return composeCampMessagesWithBreakdown(input).messages;
@@ -214,6 +248,7 @@ export function composeCampMessages(input: {
 export function composeCampOpenRouterRequestWithBreakdown(input: {
   camp: Camp;
   userMessage: string;
+  userAttachments?: CampMessageAttachment[];
   selectedArtifacts?: CampArtifact[];
   temperature: number;
   maxTokens: number;
@@ -226,6 +261,7 @@ export function composeCampOpenRouterRequestWithBreakdown(input: {
   const composed = composeCampMessagesWithBreakdown({
     camp: input.camp,
     userMessage: input.userMessage,
+    userAttachments: input.userAttachments,
     selectedArtifacts: input.selectedArtifacts,
   });
 
@@ -245,6 +281,7 @@ export function composeCampOpenRouterRequestWithBreakdown(input: {
 export function composeCampOpenRouterRequest(input: {
   camp: Camp;
   userMessage: string;
+  userAttachments?: CampMessageAttachment[];
   selectedArtifacts?: CampArtifact[];
   temperature: number;
   maxTokens: number;

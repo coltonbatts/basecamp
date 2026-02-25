@@ -140,8 +140,8 @@ function normalizeLoopTranscriptMessages(messages: OpenRouterChatMessage[]): Cam
   return normalized;
 }
 
-function assertNonEmptyOutput(outputText: string): void {
-  if (!outputText.trim()) {
+function assertNonEmptyOutput(outputText: string, hasTools = false): void {
+  if (!outputText.trim() && !hasTools) {
     throw new Error('Model returned an empty response.');
   }
 }
@@ -233,7 +233,7 @@ export async function runCampChatRuntime(input: RunCampChatRuntimeInput): Promis
       await emitRunEvent(input.campId, makeRunStateEvent(runId, 'run_completed'));
     }
 
-    assertNonEmptyOutput(looped.outputText);
+    assertNonEmptyOutput(looped.outputText, looped.transcriptMessages.length > 1);
 
     return {
       outputText: looped.outputText,

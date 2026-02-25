@@ -18,12 +18,14 @@ import {
   campListArtifacts,
   campLoad,
   campReadContextFile,
+  campReadContextFileBase64,
   campSearchTranscript,
   campUpdateConfig,
   campUpdateArtifact,
   campUpdateMemory,
   campUpdateSystemPrompt,
   campWriteContextFile,
+  campWriteContextFileBytes,
   dbListModels,
   ensureDefaultWorkspace,
   pickWorkspaceFolder,
@@ -44,9 +46,9 @@ import {
 } from '../lib/inspect';
 import { syncModelsToDb } from '../lib/models';
 import { OpenRouterRequestError, type OpenRouterToolCall } from '../lib/openrouter';
-import { CAMP_TOOLS, executeCampToolCall, executeMcpToolCall, getAllToolSpecs, getToolKind, isMcpToolName } from '../lib/tools';
+import { executeCampToolCall, executeMcpToolCall, getAllToolSpecs, getToolKind, isMcpToolName } from '../lib/tools';
 import { buildMcpToolEntry, setMcpTools } from '../lib/tools/registry';
-import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow } from '../lib/types';
+import type { Camp, CampArtifact, CampArtifactMetadata, CampMessage, CampSummary, ModelRow, CampMessageAttachment } from '../lib/types';
 
 const FALLBACK_MODEL = 'openrouter/auto';
 const DEFAULT_MAX_TOKENS = 1200;
@@ -203,6 +205,7 @@ export function MainLayout() {
   const [draftSystemPrompt, setDraftSystemPrompt] = useState('');
 
   const [userMessage, setUserMessage] = useState('');
+  const [userAttachments, setUserAttachments] = useState<CampMessageAttachment[]>([]);
 
   // Minimal settings for now
   const temperature = DEFAULT_TEMPERATURE;
@@ -760,102 +763,104 @@ export function MainLayout() {
         const toolResult = isMcpToolName(toolCall.function.name)
           ? await executeMcpToolCall(toolCall)
           : await executeCampToolCall(toolCall, {
-          readFile: async (path) => campReadContextFile(campId, path),
-          listFiles: async (path) => campListContextFiles(campId, path),
-          writeFile: async (path, content) => {
-            const normalizedPath = path.trim().replace(/^\/+/, '');
-            await recordFileWritesForTurn(
-              campId,
-              [`context/${normalizedPath}`, 'camp.json'],
-              () => campWriteContextFile(campId, path, content),
-              `Tool write_file -> ${normalizedPath}`,
-            );
-          },
-          listArtifacts: async () => campListArtifacts(campId),
-          getArtifact: async (artifactId) => campGetArtifact(campId, artifactId),
-          createArtifact: async ({ sourceMessageId, title, tags }) => {
-            const artifact = await recordFileWritesForTurn(
-              campId,
-              ['artifacts/index.json', 'camp.json'],
-              () =>
-                campCreateArtifactFromMessage({
-                  camp_id: campId,
-                  message_id: sourceMessageId,
-                  title,
-                  tags,
-                }),
-              'Tool create_artifact',
-            );
+            readFile: async (path) => campReadContextFile(campId, path),
+            listFiles: async (path) => campListContextFiles(campId, path),
+            writeFile: async (path, content, encoding) => {
+              const normalizedPath = path.trim().replace(/^\/+/, '');
+              await recordFileWritesForTurn(
+                campId,
+                [`context/${normalizedPath}`, 'camp.json'],
+                () => encoding === 'base64'
+                  ? campWriteContextFileBytes(campId, path, content)
+                  : campWriteContextFile(campId, path, content),
+                `Tool write_file -> ${normalizedPath}`,
+              );
+            },
+            listArtifacts: async () => campListArtifacts(campId),
+            getArtifact: async (artifactId) => campGetArtifact(campId, artifactId),
+            createArtifact: async ({ sourceMessageId, title, tags }) => {
+              const artifact = await recordFileWritesForTurn(
+                campId,
+                ['artifacts/index.json', 'camp.json'],
+                () =>
+                  campCreateArtifactFromMessage({
+                    camp_id: campId,
+                    message_id: sourceMessageId,
+                    title,
+                    tags,
+                  }),
+                'Tool create_artifact',
+              );
 
-            const artifactPath = `artifacts/${artifact.metadata.filename}`;
-            const artifactMeta = await captureCampFileMeta(campId, artifactPath);
-            inspectFileWritesRef.current.set(artifactPath, {
-              path: artifactPath,
-              before: null,
-              after: artifactMeta,
-            });
-            commitFileWritesToInspectTurn();
+              const artifactPath = `artifacts/${artifact.metadata.filename}`;
+              const artifactMeta = await captureCampFileMeta(campId, artifactPath);
+              inspectFileWritesRef.current.set(artifactPath, {
+                path: artifactPath,
+                before: null,
+                after: artifactMeta,
+              });
+              commitFileWritesToInspectTurn();
 
-            return artifact;
-          },
-          updateArtifact: async ({ artifactId, title, body, tags }) => {
-            const artifact = await recordFileWritesForTurn(
-              campId,
-              ['artifacts/index.json', 'camp.json'],
-              () =>
-                campUpdateArtifact({
-                  camp_id: campId,
-                  artifact_id: artifactId,
-                  title,
-                  body,
-                  tags,
-                }),
-              'Tool update_artifact',
-            );
+              return artifact;
+            },
+            updateArtifact: async ({ artifactId, title, body, tags }) => {
+              const artifact = await recordFileWritesForTurn(
+                campId,
+                ['artifacts/index.json', 'camp.json'],
+                () =>
+                  campUpdateArtifact({
+                    camp_id: campId,
+                    artifact_id: artifactId,
+                    title,
+                    body,
+                    tags,
+                  }),
+                'Tool update_artifact',
+              );
 
-            const artifactPath = `artifacts/${artifact.metadata.filename}`;
-            const artifactMeta = await captureCampFileMeta(campId, artifactPath);
-            inspectFileWritesRef.current.set(artifactPath, {
-              path: artifactPath,
-              before: null,
-              after: artifactMeta,
-            });
-            commitFileWritesToInspectTurn();
+              const artifactPath = `artifacts/${artifact.metadata.filename}`;
+              const artifactMeta = await captureCampFileMeta(campId, artifactPath);
+              inspectFileWritesRef.current.set(artifactPath, {
+                path: artifactPath,
+                before: null,
+                after: artifactMeta,
+              });
+              commitFileWritesToInspectTurn();
 
-            return artifact;
-          },
-          searchTranscript: async ({ query, limit, roles }) =>
-            campSearchTranscript(campId, {
-              query,
-              limit,
-              roles,
-            }),
-          updateCampPrompt: async (systemPrompt) => {
-            await recordFileWritesForTurn(
-              campId,
-              ['system_prompt.md', 'camp.json'],
-              () =>
-                campUpdateSystemPrompt({
-                  camp_id: campId,
-                  system_prompt: systemPrompt,
-                }),
-              'Tool update_camp_prompt',
-            );
-            setDraftSystemPrompt(systemPrompt);
-          },
-          updateCampMemory: async (memory) => {
-            await recordFileWritesForTurn(
-              campId,
-              ['memory.json', 'camp.json'],
-              () =>
-                campUpdateMemory({
-                  camp_id: campId,
-                  memory,
-                }),
-              'Tool update_camp_memory',
-            );
-          },
-        });
+              return artifact;
+            },
+            searchTranscript: async ({ query, limit, roles }) =>
+              campSearchTranscript(campId, {
+                query,
+                limit,
+                roles,
+              }),
+            updateCampPrompt: async (systemPrompt) => {
+              await recordFileWritesForTurn(
+                campId,
+                ['system_prompt.md', 'camp.json'],
+                () =>
+                  campUpdateSystemPrompt({
+                    camp_id: campId,
+                    system_prompt: systemPrompt,
+                  }),
+                'Tool update_camp_prompt',
+              );
+              setDraftSystemPrompt(systemPrompt);
+            },
+            updateCampMemory: async (memory) => {
+              await recordFileWritesForTurn(
+                campId,
+                ['memory.json', 'camp.json'],
+                () =>
+                  campUpdateMemory({
+                    camp_id: campId,
+                    memory,
+                  }),
+                'Tool update_camp_memory',
+              );
+            },
+          });
 
         setToolApprovalQueue((previous) =>
           previous.map((item) =>
@@ -919,7 +924,12 @@ export function MainLayout() {
     setIsLoadingContextFile(true);
     setError(null);
 
-    void campReadContextFile(selectedCampId, selectedContextFilePath)
+    const isBinary = /\.(png|jpe?g|gif|webp|pdf)$/i.test(selectedContextFilePath);
+    const readPromise = isBinary
+      ? campReadContextFileBase64(selectedCampId, selectedContextFilePath)
+      : campReadContextFile(selectedCampId, selectedContextFilePath);
+
+    void readPromise
       .then((content) => {
         if (ignore) return;
         setSelectedContextFileContent(content);
@@ -968,9 +978,9 @@ export function MainLayout() {
       const created = await campCreate({
         name: 'New Camp',
         model: modelOptions[0] || FALLBACK_MODEL,
-        system_prompt: '',
+        system_prompt: 'You are Basecamp, an expert AI assistant. You have access to tools that allow you to read, write, and manage files in the user\'s workspace. You can generate rich multimodal artifacts like PDFs, images, and HTML. When asked to create a file, image, or PDF, you MUST use the `write_file` or `create_artifact` tools to generate it. For binary formats like images or PDFs, always use the `base64` encoding parameter. Do NOT refuse to create files, and do NOT output raw base64 or binary data into the chat. Always use the provided tools.',
         memory: {},
-        tools_enabled: false,
+        tools_enabled: true,
       });
 
       await loadCamps();
@@ -1160,6 +1170,7 @@ export function MainLayout() {
             role: 'user',
             content: trimmedMessage,
             included_artifact_ids: selectedArtifactIds.length > 0 ? selectedArtifactIds : undefined,
+            attachments: userAttachments.length > 0 ? userAttachments : undefined,
           }),
         'Append user message',
       );
@@ -1464,6 +1475,7 @@ export function MainLayout() {
       }
 
       setUserMessage('');
+      setUserAttachments([]);
       setStreamingText('');
       setStatus(
         runtimeResult.usingTools
@@ -1505,6 +1517,22 @@ export function MainLayout() {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
+  };
+
+  const handleFileAttach = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64Url = e.target?.result as string;
+      setUserAttachments((prev) => [
+        ...prev,
+        { type: 'image_url', image_url: { url: base64Url } },
+      ]);
+    };
+    reader.readAsDataURL(file);
+    event.target.value = ''; // Reset input
   };
 
   const buildInspectBundlePayload = useCallback((turn: ActiveInspectTurn) => {
@@ -1692,6 +1720,20 @@ export function MainLayout() {
             {selectedCamp && selectedContextFilePath ? (
               isLoadingContextFile ? (
                 <p className="hint">Loading file...</p>
+              ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
+                  <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
+                </div>
+              ) : /\.pdf$/i.test(selectedContextFilePath) ? (
+                <div style={{ width: '100%', height: '100%' }}>
+                  <object data={`data:application/pdf;base64,${contextFileDraft}`} type="application/pdf" width="100%" height="100%">
+                    <p>Browser cannot display PDF.</p>
+                  </object>
+                </div>
+              ) : /\.html?$/i.test(selectedContextFilePath) ? (
+                <div style={{ width: '100%', height: '100%', background: 'white' }}>
+                  <iframe srcDoc={contextFileDraft} sandbox="allow-scripts allow-popups" style={{ width: '100%', height: '100%', border: 'none' }} title="Preview" />
+                </div>
               ) : (
                 <textarea
                   className="canvas-editor"
@@ -1854,6 +1896,20 @@ export function MainLayout() {
           />
 
           <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ borderTop: 'var(--border-width) solid var(--line)', paddingTop: 'var(--space-3)' }}>
+
+            {userAttachments.length > 0 && (
+              <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                {userAttachments.map((att, idx) => (
+                  <div key={idx} style={{ position: 'relative', width: '60px', height: '60px' }}>
+                    {att.type === 'image_url' && (
+                      <img src={att.image_url.url} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--line)' }} alt="Attached file" />
+                    )}
+                    <button type="button" onClick={() => setUserAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ position: 'absolute', top: '-5px', right: '-5px', background: 'var(--text-error, red)', color: 'var(--bg, white)', borderRadius: '50%', width: '20px', height: '20px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', padding: 0, lineHeight: 1 }}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <textarea
               ref={composerTextareaRef}
               value={userMessage}
@@ -1865,7 +1921,13 @@ export function MainLayout() {
               autoFocus
               style={{ minHeight: '80px', marginBottom: 'var(--space-2)' }}
             />
-            <div className="composer-actions" style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <div className="composer-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div className="composer-toolbar">
+                <input type="file" id="composer-file-upload" accept="image/*" onChange={handleFileAttach} style={{ display: 'none' }} />
+                <label htmlFor="composer-file-upload" className="secondary-action" style={{ cursor: 'pointer', fontSize: '0.9rem', opacity: 0.8 }}>
+                  [+] Attach
+                </label>
+              </div>
               <button type="submit" className="primary-action" disabled={isSending || !selectedCamp}>
                 {isSending ? 'Sending...' : 'Send'}
               </button>

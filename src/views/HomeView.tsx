@@ -190,9 +190,8 @@ export function HomeView() {
       const created = await campCreate({
         name: newCampName.trim() || 'New Camp',
         model: newCampModel.trim() || defaultModel,
-        system_prompt: '',
-        memory: {},
-        tools_enabled: false,
+        system_prompt: 'You are Basecamp, an expert AI assistant. You have access to tools that allow you to read, write, and manage files in the user\'s workspace. You can generate rich multimodal artifacts like PDFs, images, and HTML. When asked to create a file, image, or PDF, you MUST use the `write_file` or `create_artifact` tools to generate it. For binary formats like images or PDFs, always use the `base64` encoding parameter. Do NOT refuse to create files, and do NOT output raw base64 or binary data into the chat. Always use the provided tools.',
+        tools_enabled: true,
       });
 
       setNewCampName('New Camp');

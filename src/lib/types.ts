@@ -178,6 +178,12 @@ export type CampMessage = {
   tool_call_id?: string;
   tool_calls?: CampToolCall[];
   included_artifact_ids?: string[];
+  attachments?: CampMessageAttachment[];
+};
+
+export type CampMessageAttachment = {
+  type: 'image_url';
+  image_url: { url: string };
 };
 
 export type CampMessageRole = CampMessage['role'];
@@ -248,6 +254,7 @@ export type CampAppendMessagePayload = {
   tool_call_id?: string;
   tool_calls?: CampToolCall[];
   included_artifact_ids?: string[];
+  attachments?: CampMessageAttachment[];
 };
 
 export type CampArtifactMetadata = {

@@ -30,7 +30,7 @@ if (!window.__TAURI__) {
         id: 'test-camp',
         name: 'Test Camp',
         model: 'openrouter/auto',
-        tools_enabled: false,
+        tools_enabled: true,
         created_at: Date.now(),
         updated_at: Date.now(),
         transcript: [],
