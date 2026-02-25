@@ -882,6 +882,9 @@ textarea {
   border: var(--border-width) solid var(--line-strong);
   background: var(--bg);
   color: var(--text);
+  -webkit-text-fill-color: var(--text);
+  -webkit-appearance: none;
+  appearance: none;
   clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
       100% var(--corner), 100% calc(100% - var(--corner)),
       calc(100% - var(--corner)) 100%, var(--corner) 100%,
@@ -1185,6 +1188,7 @@ button:disabled {
 .arena-slot.done .arena-slot-output {
   border-top-color: var(--accent);
 }
+
 .team-config-panel,
 .team-arena-shell {
   display: flex;
@@ -1374,4 +1378,146 @@ button:disabled {
   .team-artifacts {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── ViewState UI Blocks ────────────────────────────────────────── */
+
+@keyframes brutalist-pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.4;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+
+  100% {
+    transform: translateY(100%);
+  }
+}
+
+.view-state-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 120px;
+  padding: var(--space-4);
+  background: var(--bg);
+  border: var(--border-width) solid var(--line);
+  clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+      100% var(--corner), 100% calc(100% - var(--corner)),
+      calc(100% - var(--corner)) 100%, var(--corner) 100%,
+      0 calc(100% - var(--corner)), 0 var(--corner));
+  position: relative;
+  overflow: hidden;
+}
+
+.view-state-container::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(0deg, transparent 50%, rgba(255, 255, 255, 0.02) 50%);
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.view-state-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  max-width: 400px;
+}
+
+.view-state-icon {
+  font-size: 2rem;
+  line-height: 1;
+  margin-bottom: var(--space-1);
+  filter: drop-shadow(4px 4px 0 var(--line-strong));
+}
+
+.view-state-title {
+  margin: 0;
+  font-size: var(--text-base);
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.view-state-message {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.view-state-action {
+  margin-top: var(--space-2);
+  background: var(--text);
+  color: var(--bg);
+  border: none;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  font-family: inherit;
+  cursor: pointer;
+  clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+      100% var(--corner), 100% calc(100% - var(--corner)),
+      calc(100% - var(--corner)) 100%, var(--corner) 100%,
+      0 calc(100% - var(--corner)), 0 var(--corner));
+  transition: transform 0.1s;
+}
+
+.view-state-action:active {
+  transform: translate(2px, 2px);
+}
+
+/* Modifier: Loading */
+.view-state-loading {
+  border-style: dashed;
+}
+
+.view-state-loading .view-state-icon {
+  animation: brutalist-pulse 1.5s infinite steps(2);
+}
+
+/* Modifier: Error */
+.view-state-error {
+  border-color: var(--accent);
+  background: rgba(255, 0, 0, 0.05);
+}
+
+.view-state-error .view-state-icon {
+  color: var(--accent);
+  filter: drop-shadow(4px 4px 0 rgba(255, 0, 0, 0.2));
+}
+
+.view-state-error .view-state-title {
+  color: var(--accent);
+}
+
+::placeholder,
+::-webkit-input-placeholder {
+  color: var(--text-muted);
+  -webkit-text-fill-color: var(--text-muted);
 }

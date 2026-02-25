@@ -1,4 +1,5 @@
 import type { Camp, CampArtifactMetadata, CampMessage } from '../lib/types';
+import { ViewState } from './ui/ViewState';
 
 type TranscriptViewProps = {
   selectedCamp: Camp | null;
@@ -105,9 +106,19 @@ export function TranscriptView(props: TranscriptViewProps) {
         </article>
       ))}
 
-      {!props.selectedCamp ? <p className="hint">Pick a camp and send your first message.</p> : null}
+      {!props.selectedCamp ? (
+        <ViewState.Empty
+          title="No Camp Selected"
+          message="Create or select a camp from the sidebar to begin."
+          icon="🏕️"
+        />
+      ) : null}
       {props.selectedCamp && !props.selectedCamp.transcript.length && !props.streamingText ? (
-        <p className="hint">No messages yet.</p>
+        <ViewState.Empty
+          title="Empty Camp"
+          message="Send a message to start traversing the context."
+          icon="💬"
+        />
       ) : null}
     </div>
   );

@@ -12,6 +12,7 @@ import { TeamArena } from '../components/TeamArena';
 import { TeamConfig } from '../components/TeamConfig';
 import { InspectPanel, type InspectFileWrite, type InspectTurnData } from '../components/InspectPanel';
 import { TranscriptView } from '../components/TranscriptView';
+import { ViewState } from '../components/ui/ViewState';
 import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
 import {
   campAppendMessage,
@@ -1790,7 +1791,9 @@ export function MainLayout() {
                   <span>{camp.model}</span>
                 </button>
               ))}
-              {camps.length === 0 ? <p className="hint">No camps yet.</p> : null}
+              {camps.length === 0 ? (
+                <ViewState.Empty title="No Camps" message="Create your first basecamp to begin orchestrating." icon="⛺" />
+              ) : null}
             </div>
           )}
           renderFiles={() => (
@@ -1800,8 +1803,12 @@ export function MainLayout() {
                   {isRefreshingContext ? '...' : '🔄 Refresh'}
                 </button>
               </div>
-              {!selectedCamp ? <p className="hint">Select a camp to view its files.</p> : null}
-              {selectedCamp && contextTree.length === 0 ? <p className="hint">No attached files.</p> : null}
+              {!selectedCamp ? (
+                <ViewState.Empty title="No Basecamp Selected" message="Select a Camp to explore context paths." />
+              ) : null}
+              {selectedCamp && contextTree.length === 0 ? (
+                <ViewState.Empty title="Context Empty" message="No tracked files found." />
+              ) : null}
               {selectedCamp ? renderContextTree(contextTree) : null}
             </div>
           )}
@@ -1852,7 +1859,7 @@ export function MainLayout() {
                 })}
               </div>
               {selectedCamp && visibleArtifacts.length === 0 ? (
-                <p className="hint">No artifacts found for this filter.</p>
+                <ViewState.Empty title="No Match" message="No artifacts found." />
               ) : null}
             </div>
           )}
@@ -1889,11 +1896,15 @@ export function MainLayout() {
 
             return (
               <div className="canvas-editor-shell" style={{ border: 'none', background: 'transparent', flex: '1', minHeight: 0, padding: 'var(--space-2)', display: 'flex', flexDirection: 'column' }}>
-                {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
-                {selectedCamp && !selectedContextFilePath ? <p className="hint">Select a file from the explorer to view or edit.</p> : null}
+                {!selectedCamp ? (
+                  <ViewState.Empty title="Uninitialized" message="Create or select a camp to compose artifacts." icon="🏗️" />
+                ) : null}
+                {selectedCamp && !selectedContextFilePath ? (
+                  <ViewState.Empty title="No File Selected" message="Pick a file from the explorer to preview or edit." icon="📄" />
+                ) : null}
                 {selectedCamp && selectedContextFilePath ? (
                   isLoadingContextFile ? (
-                    <p className="hint">Loading file...</p>
+                    <ViewState.Loading title="Loading File..." />
                   ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
                     <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
                       <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
@@ -2051,40 +2062,40 @@ export function MainLayout() {
               </div>
             ) : (
               <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ border: 'none', borderTop: 'var(--border-width) solid var(--line)', padding: 'var(--space-2)', margin: 0 }}>
-              {userAttachments.length > 0 && (
-                <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                  {userAttachments.map((att, idx) => (
-                    <div key={idx} style={{ position: 'relative', width: '40px', height: '40px' }}>
-                      {att.type === 'image_url' && (
-                        <img src={att.image_url.url} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--line)' }} alt="Attached file" />
-                      )}
-                      <button type="button" onClick={() => setUserAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ position: 'absolute', top: '-5px', right: '-5px', background: 'var(--text-error, red)', color: 'var(--bg, white)', borderRadius: '50%', width: '16px', height: '16px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', padding: 0, lineHeight: 1 }}>×</button>
-                    </div>
-                  ))}
+                {userAttachments.length > 0 && (
+                  <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                    {userAttachments.map((att, idx) => (
+                      <div key={idx} style={{ position: 'relative', width: '40px', height: '40px' }}>
+                        {att.type === 'image_url' && (
+                          <img src={att.image_url.url} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--line)' }} alt="Attached file" />
+                        )}
+                        <button type="button" onClick={() => setUserAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ position: 'absolute', top: '-5px', right: '-5px', background: 'var(--text-error, red)', color: 'var(--bg, white)', borderRadius: '50%', width: '16px', height: '16px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', padding: 0, lineHeight: 1 }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <textarea
+                  ref={composerTextareaRef}
+                  value={userMessage}
+                  onChange={(event) => setUserMessage(event.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  rows={2}
+                  placeholder={selectedCamp ? 'Ask anything...' : 'Create or select a camp first'}
+                  disabled={!selectedCamp}
+                  autoFocus
+                  style={{ minHeight: '60px', marginBottom: 'var(--space-2)', fontSize: 'var(--text-sm)', border: 'none', background: 'transparent', resize: 'none' }}
+                />
+                <div className="composer-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div className="composer-toolbar">
+                    <input type="file" id="composer-file-upload" accept="image/*" onChange={handleFileAttach} style={{ display: 'none' }} />
+                    <label htmlFor="composer-file-upload" className="secondary-action icon-button" style={{ cursor: 'pointer', padding: '4px 8px' }} title="Attach File">
+                      [ATTACH]
+                    </label>
+                  </div>
+                  <button type="submit" className="primary-action icon-button" disabled={isSending || !selectedCamp} title="Send Message" style={{ padding: '4px 8px' }}>
+                    {isSending ? '...' : '[SEND]'}
+                  </button>
                 </div>
-              )}
-              <textarea
-                ref={composerTextareaRef}
-                value={userMessage}
-                onChange={(event) => setUserMessage(event.target.value)}
-                onKeyDown={handleComposerKeyDown}
-                rows={2}
-                placeholder={selectedCamp ? 'Ask anything...' : 'Create or select a camp first'}
-                disabled={!selectedCamp}
-                autoFocus
-                style={{ minHeight: '60px', marginBottom: 'var(--space-2)', fontSize: 'var(--text-sm)', border: 'none', background: 'transparent', resize: 'none' }}
-              />
-              <div className="composer-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div className="composer-toolbar">
-                  <input type="file" id="composer-file-upload" accept="image/*" onChange={handleFileAttach} style={{ display: 'none' }} />
-                  <label htmlFor="composer-file-upload" className="secondary-action icon-button" style={{ cursor: 'pointer', padding: '4px 8px' }} title="Attach File">
-                    [ATTACH]
-                  </label>
-                </div>
-                <button type="submit" className="primary-action icon-button" disabled={isSending || !selectedCamp} title="Send Message" style={{ padding: '4px 8px' }}>
-                  {isSending ? '...' : '[SEND]'}
-                </button>
-              </div>
               </form>
             )
           )}
