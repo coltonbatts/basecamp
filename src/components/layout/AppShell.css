@@ -1,0 +1,140 @@
+.app-shell-root {
+    height: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    /* Reduce padding to give more room for the IDE feel */
+    z-index: 1;
+    /* relative to background */
+    position: relative;
+}
+
+.app-shell-grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    /* 5 columns: left window, left splitter, center, right splitter, right window */
+    grid-template-columns: var(--left-width) var(--left-splitter-width) minmax(0, 1fr) var(--right-splitter-width) var(--right-width);
+    gap: 0;
+    width: 100%;
+    position: relative;
+}
+
+.app-shell-pane {
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border: var(--border-width) solid var(--line);
+    clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+            100% var(--corner), 100% calc(100% - var(--corner)),
+            calc(100% - var(--corner)) 100%, var(--corner) 100%,
+            0 calc(100% - var(--corner)), 0 var(--corner));
+    overflow: hidden;
+}
+
+.app-shell-pane.collapsed {
+    display: none;
+}
+
+.app-shell-splitter {
+    min-height: 0;
+    width: 100%;
+    /* controlled by grid column */
+    cursor: col-resize;
+    background: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    z-index: 10;
+    transition: background-color 0.2s;
+}
+
+.app-shell-splitter::after {
+    content: "";
+    display: block;
+    width: 2px;
+    height: 20px;
+    background-color: var(--line-strong);
+    opacity: 0.2;
+    transition: opacity 0.2s;
+}
+
+.app-shell-splitter:hover::after,
+.app-shell-splitter:active::after {
+    opacity: 1;
+}
+
+.app-shell-splitter:hover,
+.app-shell-splitter:active {
+    background: rgba(255, 255, 255, 0.05);
+    /* Slight highlight on drag */
+}
+
+/* Base Top Bar styles to match IDE minimal requirement */
+.ide-top-bar {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: var(--space-1) var(--space-3);
+    border: var(--border-width) solid var(--line);
+    background: var(--bg);
+    clip-path: polygon(var(--corner) 0, calc(100% - var(--corner)) 0,
+            100% var(--corner), 100% calc(100% - var(--corner)),
+            calc(100% - var(--corner)) 100%, var(--corner) 100%,
+            0 calc(100% - var(--corner)), 0 var(--corner));
+    min-height: 48px;
+    /* slim single row */
+}
+
+.ide-top-bar-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    justify-content: flex-start;
+}
+
+.ide-top-bar-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+}
+
+.ide-top-bar-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-3);
+}
+
+.ide-camp-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    /* offline/error by default */
+    display: inline-block;
+    box-shadow: 0 0 5px var(--accent);
+}
+
+.status-dot.online {
+    background-color: #00ff00;
+    /* retro neon green */
+    box-shadow: 0 0 5px #00ff00;
+}

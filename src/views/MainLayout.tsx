@@ -4,6 +4,10 @@ import type { FormEvent, KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import '../App.css';
+import { AppShell } from '../components/layout/AppShell';
+import { LeftPane } from '../components/layout/LeftPane';
+import { CenterPane } from '../components/layout/CenterPane';
+import { RightPane } from '../components/layout/RightPane';
 import { InspectPanel, type InspectFileWrite, type InspectTurnData } from '../components/InspectPanel';
 import { TranscriptView } from '../components/TranscriptView';
 import { useArtifactComposerState } from '../hooks/useArtifactComposerState';
@@ -246,11 +250,43 @@ export function MainLayout() {
   const [inspectTurn, setInspectTurn] = useState<ActiveInspectTurn | null>(null);
   const [inspectExporting, setInspectExporting] = useState(false);
   const [inspectExportError, setInspectExportError] = useState<string | null>(null);
+
+  // Layout states
+  const [leftTab, setLeftTab] = useState<'camps' | 'files' | 'context'>('camps');
+  const [centerMode, setCenterMode] = useState<string>('editor');
+  const [leftPaneWidth, setLeftPaneWidth] = useState(260);
+  const [rightPaneWidth, setRightPaneWidth] = useState(360);
+  const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
+  const [rightPaneCollapsed, setRightPaneCollapsed] = useState(false);
+
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const toolApprovalResolversRef = useRef(new Map<string, (decision: ToolApprovalDecision) => void>());
   const activeCorrelationIdRef = useRef<string | null>(null);
   const inspectFileWritesRef = useRef<Map<string, InspectFileWriteMapEntry>>(new Map());
   const inspectTimelineRef = useRef<InspectEventRecord[]>([]);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
+      // Cmd/Ctrl + B: Toggle Left Pane
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setLeftPaneCollapsed(prev => !prev);
+      }
+      // Cmd/Ctrl + J: Toggle Right Pane
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        setRightPaneCollapsed(prev => !prev);
+      }
+      // Cmd/Ctrl + K: Focus command palette / search (placeholder for now)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        console.log('Command palette shortcut invoked');
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, []);
 
   const modelOptions = useMemo(() => (models.length > 0 ? models.map((model) => model.id) : [FALLBACK_MODEL]), [models]);
   const modelOptionsWithLabels = useMemo(() => (models.length > 0 ? models.map((model) => ({ id: model.id, label: modelDisplayLabel(model) })) : [{ id: FALLBACK_MODEL, label: FALLBACK_MODEL }]), [models]);
@@ -1671,38 +1707,64 @@ export function MainLayout() {
   };
 
   return (
-    <div className="camp-workspace trail-shell">
-      <header className="trail-header">
-        <div className="trail-title">
-          <h1>Basecamp</h1>
-          <p>{workspacePath ?? 'Choose a workspace folder to begin'}</p>
-        </div>
-
-        <div className="trail-toolbar">
-          <button type="button" onClick={() => navigate('/home')}>
-            Home
-          </button>
-          <button type="button" onClick={handlePickWorkspace}>
-            Open Folder
-          </button>
-          <button type="button" onClick={handleSyncModels} disabled={isSyncingModels}>
-            {isSyncingModels ? 'Syncing...' : 'Sync Models'}
-          </button>
-        </div>
-      </header>
-
-      {status ? <p className="status-line">{status}</p> : null}
-      {error ? <p className="error-line">{error}</p> : null}
-
-      <main className="main-layout-panels">
-        {/* Left Sidebar: Explorer */}
-        <div className="main-layout-explorer panel">
-          <div className="panel-header">
-            <h2>EXPLORER</h2>
+    <AppShell
+      leftPaneWidth={leftPaneWidth}
+      rightPaneWidth={rightPaneWidth}
+      onLeftPaneResize={setLeftPaneWidth}
+      onRightPaneResize={setRightPaneWidth}
+      leftPaneCollapsed={leftPaneCollapsed}
+      rightPaneCollapsed={rightPaneCollapsed}
+      topBar={
+        <header className="ide-top-bar">
+          <div className="ide-top-bar-left">
+            <h1 className="ide-camp-title">
+              Basecamp
+              <span className={`status-dot ${selectedProviderStatus && !selectedProviderStatus.last_error ? 'online' : ''}`} title={selectedProviderStatus?.last_error || 'Online'} />
+            </h1>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              {workspacePath ? (selectedCamp?.config.name || 'No Camp Selected') : 'No Workspace'}
+            </span>
           </div>
-
-          <section className="explorer-section camp-list-panel">
-            <div className="camp-list-scroll">
+          <div className="ide-top-bar-center">
+            {selectedCamp && (
+              <select
+                value={draftModel}
+                onChange={(event) => setDraftModel(event.target.value)}
+                style={{ width: '240px', padding: 'var(--space-1) var(--space-2)', fontSize: 'var(--text-xs)' }}
+              >
+                {modelOptionsWithLabels.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+            )}
+            {error && <span className="error-line" style={{ margin: 0, padding: 'var(--space-1) var(--space-2)' }}>{error}</span>}
+            {status && <span className="status-line" style={{ margin: 0, padding: 'var(--space-1) var(--space-2)' }}>{status}</span>}
+          </div>
+          <div className="ide-top-bar-right">
+            <button type="button" className="icon-button" onClick={() => navigate('/home')} title="Home">HOME</button>
+            <button type="button" className="icon-button" onClick={handlePickWorkspace} title="Open Folder">DIR</button>
+            <button type="button" className="icon-button" onClick={handleSyncModels} disabled={isSyncingModels} title="Sync Models">
+              {isSyncingModels ? '...' : 'SYNC'}
+            </button>
+            {workspacePath && (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleCreateCamp}
+                title="New Camp"
+              >
+                NEW
+              </button>
+            )}
+          </div>
+        </header>
+      }
+      leftPane={
+        <LeftPane
+          activeTab={leftTab}
+          onTabChange={setLeftTab}
+          renderCamps={() => (
+            <div className="camp-list-scroll" style={{ border: 'none', background: 'transparent' }}>
               {camps.map((camp) => (
                 <button
                   type="button"
@@ -1716,292 +1778,255 @@ export function MainLayout() {
               ))}
               {camps.length === 0 ? <p className="hint">No camps yet.</p> : null}
             </div>
-
-            {workspacePath && (
-              <button
-                type="button"
-                className="primary-action"
-                onClick={handleCreateCamp}
-                style={{ marginTop: 'var(--space-2)' }}
-              >
-                Create Camp
-              </button>
-            )}
-          </section>
-
-          <section className="explorer-section explorer-tree" style={{ marginTop: 'var(--space-3)' }}>
-            <div className="panel-header" style={{ paddingLeft: 0, paddingRight: 0, borderBottom: 'none' }}>
-              <h2>FILES</h2>
-              <button type="button" onClick={handleRefreshContext} disabled={isRefreshingContext} style={{ padding: 'var(--space-1) var(--space-2)', fontSize: 'var(--text-xs)' }}>
-                {isRefreshingContext ? '...' : 'Refresh'}
-              </button>
-            </div>
-            <div className="context-tree-scroll" style={{ flex: 1, minHeight: 0 }}>
+          )}
+          renderFiles={() => (
+            <div className="context-tree-scroll" style={{ border: 'none', background: 'transparent' }}>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--space-2)' }}>
+                <button type="button" className="icon-button" onClick={handleRefreshContext} disabled={isRefreshingContext} style={{ padding: 'var(--space-1)', fontSize: '10px' }}>
+                  {isRefreshingContext ? '...' : '🔄 Refresh'}
+                </button>
+              </div>
               {!selectedCamp ? <p className="hint">Select a camp to view its files.</p> : null}
               {selectedCamp && contextTree.length === 0 ? <p className="hint">No attached files.</p> : null}
               {selectedCamp ? renderContextTree(contextTree) : null}
             </div>
-          </section>
-        </div>
-
-        {/* Center Pane: Canvas */}
-        <div className="main-layout-canvas panel">
-          <div className="panel-header chat-header">
-            <div>
-              <h2>CANVAS</h2>
-            </div>
-            <div className="canvas-actions">
-              <button
-                type="button"
-                className="primary-action"
-                onClick={handleSaveContextFile}
-                disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
-              >
-                {isSavingContextFile ? 'Saving...' : 'Save File'}
-              </button>
-            </div>
-          </div>
-
-          <div className="canvas-editor-shell">
-            {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
-            {selectedCamp && !selectedContextFilePath ? <p className="hint">Select a file from the explorer to view or edit.</p> : null}
-            {selectedCamp && selectedContextFilePath ? (
-              isLoadingContextFile ? (
-                <p className="hint">Loading file...</p>
-              ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
-                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
-                  <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
-                </div>
-              ) : /\.pdf$/i.test(selectedContextFilePath) ? (
-                <div style={{ width: '100%', height: '100%' }}>
-                  <object data={`data:application/pdf;base64,${contextFileDraft}`} type="application/pdf" width="100%" height="100%">
-                    <p>Browser cannot display PDF.</p>
-                  </object>
-                </div>
-              ) : /\.html?$/i.test(selectedContextFilePath) ? (
-                <div style={{ width: '100%', height: '100%', background: 'white' }}>
-                  <iframe srcDoc={contextFileDraft} sandbox="allow-scripts allow-popups" style={{ width: '100%', height: '100%', border: 'none' }} title="Preview" />
-                </div>
-              ) : (
-                <textarea
-                  className="canvas-editor"
-                  value={contextFileDraft}
-                  onChange={(event) => setContextFileDraft(event.target.value)}
-                  spellCheck={false}
+          )}
+          renderContext={() => (
+            <div className="artifact-scroll composer-artifact-scroll" style={{ border: 'none', background: 'transparent', maxHeight: 'none' }}>
+              <label>
+                <span>Search Artifacts</span>
+                <input
+                  type="text"
+                  value={artifactQuery}
+                  onChange={(event) => setArtifactQuery(event.target.value)}
+                  placeholder="Filter by title or tag"
+                  disabled={!selectedCamp}
                 />
-              )
-            ) : null}
-          </div>
-        </div>
+              </label>
 
-        {/* Right Sidebar: Chat */}
-        <div className="main-layout-chat panel">
-          <div className="panel-header chat-header">
-            <div>
-              <h2>CHAT</h2>
-            </div>
-            {selectedCamp && (
-              <div style={{ textAlign: 'right' }}>
-                <label className="chat-model-picker" style={{ display: 'inline-block' }}>
-                  <select value={draftModel} onChange={(event) => setDraftModel(event.target.value)} style={{ width: '180px', marginTop: 0 }}>
-                    {modelOptionsWithLabels.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="settings-toggle" style={{ marginTop: '6px', display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
-                  <input
-                    type="checkbox"
-                    checked={draftToolsEnabled}
-                    disabled={!selectedModelSupportsTools}
-                    onChange={(event) => setDraftToolsEnabled(event.target.checked)}
-                  />
-                  <span style={{ fontSize: '0.8rem' }}>Tools</span>
-                </label>
-                {!selectedModelSupportsTools ? (
-                  <p className="hint" style={{ marginTop: '4px' }}>
-                    This model does not support tool calls.
-                  </p>
-                ) : null}
-                {selectedProviderStatus?.last_error ? (
-                  <p className="error-line" style={{ marginTop: '4px' }}>
-                    Provider offline: {selectedProviderStatus.last_error}
-                  </p>
-                ) : null}
+              {selectedArtifactsForComposer.length > 0 && (
+                <div className="artifact-chip-row" style={{ marginTop: 'var(--space-2)' }}>
+                  {selectedArtifactsForComposer.map((artifact) => (
+                    <button
+                      key={artifact.id}
+                      type="button"
+                      className="artifact-chip selectable"
+                      onClick={() => removeSelectedArtifact(artifact.id)}
+                      title="Remove from next message"
+                    >
+                      {artifact.title}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ marginTop: 'var(--space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                {visibleArtifacts.map((artifact) => {
+                  const isSelected = selectedArtifactIds.includes(artifact.id);
+                  return (
+                    <button
+                      key={artifact.id}
+                      type="button"
+                      className={`artifact-item artifact-select-toggle ${isSelected ? 'is-selected' : ''}`}
+                      onClick={() => toggleArtifactSelection(artifact.id)}
+                      disabled={!selectedCamp || isSending}
+                    >
+                      <strong>{artifact.title}</strong>
+                      <p>{artifact.tags.length > 0 ? artifact.tags.join(', ') : 'No tags'}</p>
+                    </button>
+                  );
+                })}
               </div>
-            )}
-          </div>
-
-          <TranscriptView
-            selectedCamp={selectedCamp}
-            streamingText={streamingText}
-            artifactById={artifactById}
-            isSending={isSending}
-            promotingMessageId={promotingMessageId}
-            onBranchFromMessage={handleBranchFromMessage}
-            onReplayFromMessage={handleReplayFromMessage}
-            onPromoteMessageToArtifact={(message) => {
-              void handlePromoteMessageToArtifact(message);
-            }}
-          />
-
-          <section className="composer-artifact-drawer">
-            <header className="panel-header">
-              <h2>ARTIFACTS</h2>
-              <button type="button" onClick={clearSelectedArtifacts} disabled={selectedArtifactIds.length === 0}>
-                Clear
-              </button>
-            </header>
-            <label>
-              <span>Search Artifacts</span>
-              <input
-                type="text"
-                value={artifactQuery}
-                onChange={(event) => setArtifactQuery(event.target.value)}
-                placeholder="Filter by title or tag"
-                disabled={!selectedCamp}
-              />
-            </label>
-            {selectedArtifactsForComposer.length > 0 ? (
-              <div className="artifact-chip-row">
-                {selectedArtifactsForComposer.map((artifact) => (
-                  <button
-                    key={artifact.id}
-                    type="button"
-                    className="artifact-chip selectable"
-                    onClick={() => removeSelectedArtifact(artifact.id)}
-                    title="Remove from next message"
-                  >
-                    {artifact.title}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="hint">No artifacts selected for this prompt.</p>
-            )}
-            <div className="artifact-scroll composer-artifact-scroll">
-              {visibleArtifacts.map((artifact) => {
-                const isSelected = selectedArtifactIds.includes(artifact.id);
-                return (
-                  <button
-                    key={artifact.id}
-                    type="button"
-                    className={`artifact-item artifact-select-toggle ${isSelected ? 'is-selected' : ''}`}
-                    onClick={() => toggleArtifactSelection(artifact.id)}
-                    disabled={!selectedCamp || isSending}
-                  >
-                    <strong>{artifact.title}</strong>
-                    <p>{artifact.tags.length > 0 ? artifact.tags.join(', ') : 'No tags'}</p>
-                  </button>
-                );
-              })}
               {selectedCamp && visibleArtifacts.length === 0 ? (
                 <p className="hint">No artifacts found for this filter.</p>
               ) : null}
             </div>
-          </section>
-
-          <section className="tool-approval-queue">
-            <header className="panel-header">
-              <h2>TOOL QUEUE</h2>
-              <div className="tool-queue-actions">
-                <button
-                  type="button"
-                  onClick={handleApproveAllPendingToolCalls}
-                  disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
-                >
-                  Approve All
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRejectAllPendingToolCalls}
-                  disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
-                >
-                  Reject All
-                </button>
-              </div>
-            </header>
-            <div className="tool-queue-list">
-              {toolApprovalQueue.map((item) => (
-                <article key={item.id} className={`tool-queue-item ${item.status}`}>
-                  <header>
-                    <strong>{item.name}</strong>
-                    <span>{item.kind}</span>
-                    <span>{item.status}</span>
-                  </header>
-                  <p className="tool-queue-args">{item.argsJson}</p>
-                  {item.resultPreview ? <p className="hint">Result: {item.resultPreview}</p> : null}
-                  {item.errorMessage ? <p className="tool-queue-error">{item.errorMessage}</p> : null}
-                  {item.status === 'pending' ? (
-                    <div className="tool-queue-item-actions">
-                      <button type="button" onClick={() => handleApproveToolCall(item.id)}>
-                        Approve
-                      </button>
-                      <button type="button" onClick={() => handleRejectToolCall(item.id)}>
-                        Reject
-                      </button>
-                    </div>
-                  ) : null}
-                </article>
-              ))}
-              {toolApprovalQueue.length === 0 ? (
-                <p className="hint">No tool calls in this run yet.</p>
+          )}
+        />
+      }
+      centerPane={
+        <CenterPane
+          mode={centerMode}
+          modes={['editor']}
+          onModeChange={setCenterMode}
+          renderHeaderActions={() => (
+            <>
+              <button
+                type="button"
+                className="primary-action icon-button"
+                onClick={handleSaveContextFile}
+                disabled={!selectedCamp || !selectedContextFilePath || !contextFileDirty || isSavingContextFile}
+                title="Save File"
+              >
+                {isSavingContextFile ? '...' : '💾'}
+              </button>
+            </>
+          )}
+          renderContent={() => (
+            <div className="canvas-editor-shell" style={{ border: 'none', background: 'transparent', flex: '1', minHeight: 0, padding: 'var(--space-2)', display: 'flex', flexDirection: 'column' }}>
+              {!selectedCamp ? <p className="hint">Create or select a camp to open files.</p> : null}
+              {selectedCamp && !selectedContextFilePath ? <p className="hint">Select a file from the explorer to view or edit.</p> : null}
+              {selectedCamp && selectedContextFilePath ? (
+                isLoadingContextFile ? (
+                  <p className="hint">Loading file...</p>
+                ) : /\.(png|jpe?g|gif|webp)$/i.test(selectedContextFilePath) ? (
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', padding: 'var(--space-4)' }}>
+                    <img src={`data:image/${selectedContextFilePath.split('.').pop()};base64,${contextFileDraft}`} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} alt="Preview" />
+                  </div>
+                ) : /\.pdf$/i.test(selectedContextFilePath) ? (
+                  <div style={{ width: '100%', height: '100%' }}>
+                    <object data={`data:application/pdf;base64,${contextFileDraft}`} type="application/pdf" width="100%" height="100%">
+                      <p>Browser cannot display PDF.</p>
+                    </object>
+                  </div>
+                ) : /\.html?$/i.test(selectedContextFilePath) ? (
+                  <div style={{ width: '100%', height: '100%', background: 'white' }}>
+                    <iframe srcDoc={contextFileDraft} sandbox="allow-scripts allow-popups" style={{ width: '100%', height: '100%', border: 'none' }} title="Preview" />
+                  </div>
+                ) : (
+                  <textarea
+                    className="canvas-editor"
+                    value={contextFileDraft}
+                    onChange={(event) => setContextFileDraft(event.target.value)}
+                    spellCheck={false}
+                    style={{ flex: 1, minHeight: 0, margin: 0, padding: 0 }}
+                  />
+                )
               ) : null}
             </div>
-          </section>
-
-          <InspectPanel
-            enabled={developerInspectMode}
-            turn={inspectTurn}
-            exporting={inspectExporting}
-            exportError={inspectExportError}
-            onExport={() => {
-              void handleExportTurnBundle();
-            }}
-          />
-
-          <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ borderTop: 'var(--border-width) solid var(--line)', paddingTop: 'var(--space-3)' }}>
-
-            {userAttachments.length > 0 && (
-              <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                {userAttachments.map((att, idx) => (
-                  <div key={idx} style={{ position: 'relative', width: '60px', height: '60px' }}>
-                    {att.type === 'image_url' && (
-                      <img src={att.image_url.url} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--line)' }} alt="Attached file" />
-                    )}
-                    <button type="button" onClick={() => setUserAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ position: 'absolute', top: '-5px', right: '-5px', background: 'var(--text-error, red)', color: 'var(--bg, white)', borderRadius: '50%', width: '20px', height: '20px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', padding: 0, lineHeight: 1 }}>×</button>
+          )}
+        />
+      }
+      rightPane={
+        <RightPane
+          renderTranscript={() => (
+            <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <div className="chat-header" style={{ padding: 'var(--space-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontWeight: 'bold' }}>CHAT</div>
+                {selectedCamp && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                    <label className="settings-toggle" style={{ margin: 0, display: 'flex', gap: '6px' }}>
+                      <input
+                        type="checkbox"
+                        checked={draftToolsEnabled}
+                        disabled={!selectedModelSupportsTools}
+                        onChange={(event) => setDraftToolsEnabled(event.target.checked)}
+                      />
+                      <span style={{ fontSize: '0.8rem' }}>Tools</span>
+                    </label>
                   </div>
-                ))}
+                )}
               </div>
-            )}
+              <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+                <TranscriptView
+                  selectedCamp={selectedCamp}
+                  streamingText={streamingText}
+                  artifactById={artifactById}
+                  isSending={isSending}
+                  promotingMessageId={promotingMessageId}
+                  onBranchFromMessage={handleBranchFromMessage}
+                  onReplayFromMessage={handleReplayFromMessage}
+                  onPromoteMessageToArtifact={(message) => {
+                    void handlePromoteMessageToArtifact(message);
+                  }}
+                />
+              </div>
 
-            <textarea
-              ref={composerTextareaRef}
-              value={userMessage}
-              onChange={(event) => setUserMessage(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              rows={4}
-              placeholder={selectedCamp ? 'Ask anything...' : 'Create or select a camp first'}
-              disabled={!selectedCamp}
-              autoFocus
-              style={{ minHeight: '80px', marginBottom: 'var(--space-2)' }}
-            />
-            <div className="composer-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div className="composer-toolbar">
-                <input type="file" id="composer-file-upload" accept="image/*" onChange={handleFileAttach} style={{ display: 'none' }} />
-                <label htmlFor="composer-file-upload" className="secondary-action" style={{ cursor: 'pointer', fontSize: '0.9rem', opacity: 0.8 }}>
-                  [+] Attach
-                </label>
-              </div>
-              <button type="submit" className="primary-action" disabled={isSending || !selectedCamp}>
-                {isSending ? 'Sending...' : 'Send'}
-              </button>
+              {toolApprovalQueue.length > 0 && (
+                <section className="tool-approval-queue" style={{ maxHeight: '200px', border: 'none', borderTop: 'var(--border-width) solid var(--line)', background: 'transparent' }}>
+                  <header className="panel-header" style={{ padding: 'var(--space-1) 0' }}>
+                    <h2 style={{ fontSize: 'var(--text-xs)' }}>TOOL QUEUE</h2>
+                    <div className="tool-queue-actions">
+                      <button
+                        type="button"
+                        onClick={handleApproveAllPendingToolCalls}
+                        disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                        title="Approve All"
+                        style={{ padding: '2px 4px', fontSize: '10px' }}
+                      >
+                        [APPROVE] ALL
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleRejectAllPendingToolCalls}
+                        disabled={!toolApprovalQueue.some((item) => item.status === 'pending')}
+                        title="Reject All"
+                        style={{ padding: '2px 4px', fontSize: '10px' }}
+                      >
+                        [REJECT] ALL
+                      </button>
+                    </div>
+                  </header>
+                  <div className="tool-queue-list">
+                    {toolApprovalQueue.map((item) => (
+                      <article key={item.id} className={`tool-queue-item ${item.status}`} style={{ padding: 'var(--space-1)' }}>
+                        <header>
+                          <strong style={{ fontSize: '10px' }}>{item.name}</strong>
+                          <span style={{ fontSize: '10px' }}>{item.status}</span>
+                        </header>
+                        {item.status === 'pending' ? (
+                          <div className="tool-queue-item-actions" style={{ marginTop: 'var(--space-1)' }}>
+                            <button type="button" onClick={() => handleApproveToolCall(item.id)}>[APPROVE]</button>
+                            <button type="button" onClick={() => handleRejectToolCall(item.id)}>[REJECT]</button>
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <InspectPanel
+                enabled={developerInspectMode}
+                turn={inspectTurn}
+                exporting={inspectExporting}
+                exportError={inspectExportError}
+                onExport={() => {
+                  void handleExportTurnBundle();
+                }}
+              />
             </div>
-          </form>
-        </div>
-      </main>
-    </div>
+          )}
+          renderComposer={() => (
+            <form className="composer main-layout-composer" onSubmit={handleSendMessage} style={{ border: 'none', borderTop: 'var(--border-width) solid var(--line)', padding: 'var(--space-2)', margin: 0 }}>
+              {userAttachments.length > 0 && (
+                <div className="composer-attachments" style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                  {userAttachments.map((att, idx) => (
+                    <div key={idx} style={{ position: 'relative', width: '40px', height: '40px' }}>
+                      {att.type === 'image_url' && (
+                        <img src={att.image_url.url} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: '4px', border: '1px solid var(--line)' }} alt="Attached file" />
+                      )}
+                      <button type="button" onClick={() => setUserAttachments(prev => prev.filter((_, i) => i !== idx))} style={{ position: 'absolute', top: '-5px', right: '-5px', background: 'var(--text-error, red)', color: 'var(--bg, white)', borderRadius: '50%', width: '16px', height: '16px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', padding: 0, lineHeight: 1 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <textarea
+                ref={composerTextareaRef}
+                value={userMessage}
+                onChange={(event) => setUserMessage(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                rows={2}
+                placeholder={selectedCamp ? 'Ask anything...' : 'Create or select a camp first'}
+                disabled={!selectedCamp}
+                autoFocus
+                style={{ minHeight: '60px', marginBottom: 'var(--space-2)', fontSize: 'var(--text-sm)', border: 'none', background: 'transparent', resize: 'none' }}
+              />
+              <div className="composer-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="composer-toolbar">
+                  <input type="file" id="composer-file-upload" accept="image/*" onChange={handleFileAttach} style={{ display: 'none' }} />
+                  <label htmlFor="composer-file-upload" className="secondary-action icon-button" style={{ cursor: 'pointer', padding: '4px 8px' }} title="Attach File">
+                    [ATTACH]
+                  </label>
+                </div>
+                <button type="submit" className="primary-action icon-button" disabled={isSending || !selectedCamp} title="Send Message" style={{ padding: '4px 8px' }}>
+                  {isSending ? '...' : '[SEND]'}
+                </button>
+              </div>
+            </form>
+          )}
+        />
+      }
+    />
   );
 }

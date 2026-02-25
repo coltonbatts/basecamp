@@ -57,11 +57,6 @@ export function CampCard(props: CampCardProps) {
         </header>
 
         <p className="camp-card-prompt">{props.promptPreview}</p>
-
-        <footer className="camp-card-footer">
-          <span>{new Date(props.camp.updated_at).toLocaleString()}</span>
-          <span>{props.camp.id}</span>
-        </footer>
       </button>
     </article>
   );

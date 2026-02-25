@@ -379,3 +379,12 @@ export async function getMaxIterations(): Promise<number> {
 export async function campWriteContextFileBytes(campId: string, path: string, contentBase64: string): Promise<void> {
   await invoke('tauri_cmd_write_context_file_bytes', { campId, path, contentBase64 });
 }
+
+export async function setWebGLEnabled(enabled: boolean): Promise<void> {
+  localStorage.setItem('webgl_enabled', enabled ? 'true' : 'false');
+  window.dispatchEvent(new Event('webgl_enabled_changed'));
+}
+
+export async function getWebGLEnabled(): Promise<boolean> {
+  return localStorage.getItem('webgl_enabled') === 'true';
+}

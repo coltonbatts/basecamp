@@ -16,24 +16,28 @@
 }
 
 h1 {
-  font-size: var(--text-xxl);
+  font-size: var(--text-xl);
+  /* Reduced from --text-xxl so it fits better */
   text-transform: uppercase;
   letter-spacing: -0.04em;
   line-height: 0.8;
 }
 
 h2 {
-  font-size: var(--text-xl);
+  font-size: var(--text-lg);
+  /* Scaled down proportionally from h1 */
   text-transform: uppercase;
   letter-spacing: -0.02em;
   line-height: 0.9;
 }
 
 .home-dashboard-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-2);
-  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  /* Prevent button overlap on small screens */
+  justify-content: space-between;
+  gap: var(--space-4);
+  align-items: center;
   padding: var(--space-4);
   border: var(--border-width) solid var(--line);
   background: var(--bg);
@@ -216,25 +220,17 @@ h2 {
 }
 
 .home-dashboard .camp-card-prompt {
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
   line-height: 1.4;
   color: var(--text);
   margin: var(--space-1) 0;
-}
-
-.home-dashboard .camp-card-footer {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-  border-top: var(--border-width) solid var(--line);
-  padding-top: var(--space-2);
-}
-
-.home-dashboard .camp-card-footer span:last-child {
+  /* Ensure strict 1-line truncation */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Removing the footer CSS entirely since it's redundant */
 
 .home-dashboard button,
 .home-dashboard input,

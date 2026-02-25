@@ -225,6 +225,14 @@
   margin-top: var(--space-1);
 }
 
+.icon-button {
+  padding: var(--space-1) var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.5rem;
+}
+
 .trail-rail {
   min-height: 0;
   display: grid;
@@ -307,6 +315,7 @@ label span,
 
 .transcript-scroll {
   min-height: 0;
+  height: 100%;
   overflow: auto;
   display: flex;
   flex-direction: column-reverse;

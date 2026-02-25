@@ -27,7 +27,7 @@
   --border-width: 3px;
   --corner: 6px;
 
-  --grid-unit: 8px;
+  --grid-unit: 10px;
   --space-1: var(--grid-unit);
   --space-2: calc(var(--grid-unit) * 2);
   --space-3: calc(var(--grid-unit) * 3);

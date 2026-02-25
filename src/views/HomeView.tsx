@@ -14,7 +14,7 @@ import {
   providersList,
 } from '../lib/db';
 import { syncModelsToDb } from '../lib/models';
-import type { Camp, CampSummary, ModelRow, ProviderRegistryRow } from '../lib/types';
+import type { Camp, CampSummary, ModelRow } from '../lib/types';
 import './HomeView.css';
 
 const FALLBACK_MODEL = 'openrouter/auto';
@@ -65,7 +65,8 @@ function campPreview(camp: Camp): string {
 function modelDisplayLabel(model: ModelRow): string {
   const ctx = model.context_length ? ` · ${(model.context_length / 1000).toFixed(0)}k ctx` : '';
   const name = model.name?.trim() ? model.name : model.id;
-  return `[${model.provider_kind}] ${name}${ctx}`;
+  // Previously this was `[${model.provider_kind}] ${name}`
+  return `${name}${ctx}`;
 }
 
 export function HomeView() {
@@ -76,7 +77,6 @@ export function HomeView() {
   const [campMetaById, setCampMetaById] = useState<Record<string, HomeCampMeta>>({});
 
   const [models, setModels] = useState<ModelRow[]>([]);
-  const [providers, setProviders] = useState<ProviderRegistryRow[]>([]);
   const [defaultModel, setDefaultModel] = useState(FALLBACK_MODEL);
 
   const [newCampName, setNewCampName] = useState('New Camp');
@@ -144,8 +144,9 @@ export function HomeView() {
   }, []);
 
   const loadProviders = useCallback(async () => {
-    const rows = await providersList();
-    setProviders(rows);
+    // Only invoke providersList to cache internally/fire any side effects,
+    // since we removed the visual representation from the Home UI.
+    await providersList();
   }, []);
 
   const loadDefaultModel = useCallback(async () => {
@@ -309,16 +310,6 @@ export function HomeView() {
           {isCreatingCamp ? 'INITIALIZING CAMP...' : 'ESTABLISH BASECAMP'}
         </button>
       </section>
-
-      {providers.length > 0 ? (
-        <section className="home-create-camp" aria-label="Provider status">
-          {providers.map((provider) => (
-            <p key={provider.provider_kind} className={provider.last_error ? 'error-line' : 'status-line'}>
-              {provider.provider_kind}: {provider.last_error ? `offline (${provider.last_error})` : 'healthy'}
-            </p>
-          ))}
-        </section>
-      ) : null}
 
       <section className="home-camp-list" aria-label="Camp list">
         <header>

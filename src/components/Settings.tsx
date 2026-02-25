@@ -16,6 +16,8 @@ import {
   setMaxIterations as persistMaxIterations,
   setToolsEnabled as persistToolsEnabled,
   setWorkspacePath,
+  getWebGLEnabled,
+  setWebGLEnabled as persistWebGLEnabled,
 } from '../lib/db';
 import type { ApprovalPolicy, ProviderKind, ProviderRegistryRow } from '../lib/types';
 import {
@@ -81,6 +83,8 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
   const [workspacePath, setWorkspacePathState] = useState<string | null>(null);
   const [toolsEnabled, setToolsEnabledState] = useState(true);
   const [developerInspectMode, setDeveloperInspectModeState] = useState(false);
+  const [webglEnabled, setWebglEnabledState] = useState(false);
+  const [savingWebglEnabled, setSavingWebglEnabled] = useState(false);
   const [approvalPolicy, setApprovalPolicyState] = useState<ApprovalPolicy>('manual');
   const [savingApprovalPolicy, setSavingApprovalPolicy] = useState(false);
   const [maxIterations, setMaxIterationsState] = useState(10);
@@ -95,13 +99,14 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setLoading(true);
 
       try {
-        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode, currentApprovalPolicy, currentMaxIterations, providerRows] = await Promise.all([
+        const [exists, currentWorkspacePath, currentToolsEnabled, currentDeveloperInspectMode, currentApprovalPolicy, currentMaxIterations, currentWebglEnabled, providerRows] = await Promise.all([
           hasApiKey(),
           getWorkspacePath(),
           getToolsEnabled(),
           getDeveloperInspectMode(),
           getApprovalPolicy(),
           getMaxIterations(),
+          getWebGLEnabled(),
           providersList(),
         ]);
 
@@ -109,6 +114,7 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
         setWorkspacePathState(currentWorkspacePath);
         setToolsEnabledState(currentToolsEnabled);
         setDeveloperInspectModeState(currentDeveloperInspectMode);
+        setWebglEnabledState(currentWebglEnabled);
         setApprovalPolicyState(currentApprovalPolicy as ApprovalPolicy);
         setMaxIterationsState(currentMaxIterations);
         setProviders(providerRows);
@@ -298,6 +304,25 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
       setError(toggleError instanceof Error ? toggleError.message : 'Unable to update tools setting.');
     } finally {
       setSavingToolsEnabled(false);
+    }
+  };
+
+  const handleWebglToggle = async (enabled: boolean) => {
+    setSavingWebglEnabled(true);
+    setError(null);
+    setStatus(null);
+
+    const previous = webglEnabled;
+    setWebglEnabledState(enabled);
+
+    try {
+      await persistWebGLEnabled(enabled);
+      setStatus(`WebGL UI features ${enabled ? 'enabled' : 'disabled'}.`);
+    } catch (toggleError) {
+      setWebglEnabledState(previous);
+      setError(toggleError instanceof Error ? toggleError.message : 'Unable to update WebGL setting.');
+    } finally {
+      setSavingWebglEnabled(false);
     }
   };
 
@@ -517,6 +542,23 @@ export function Settings({ cachedModelCount, modelsLastSync, onModelsSynced }: S
             </label>
             <p className="settings-note">
               Writes local debug logs to each camp at <code>.camp/debug/</code> and enables the chat Inspect panel.
+            </p>
+          </div>
+
+          <div className="settings-subsection">
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={webglEnabled}
+                disabled={savingWebglEnabled}
+                onChange={(event) => {
+                  void handleWebglToggle(event.target.checked);
+                }}
+              />
+              <span>Subtle WebGL Background Effects</span>
+            </label>
+            <p className="settings-note">
+              Enables experimental subtle visual effects like soft static noise behind the shell UI to reinforce the neo-terminal aesthetic. Respects OS reduced-motion settings securely.
             </p>
           </div>
 

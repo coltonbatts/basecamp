@@ -49,27 +49,33 @@ export function TranscriptView(props: TranscriptViewProps) {
               {message.role !== 'tool' ? (
                 <button
                   type="button"
+                  className="icon-button"
                   onClick={() => props.onPromoteMessageToArtifact(message)}
                   disabled={!props.selectedCamp || props.isSending || props.promotingMessageId === message.id}
+                  title="Save Artifact"
                 >
-                  {props.promotingMessageId === message.id ? 'Saving...' : 'Save Artifact'}
+                  {props.promotingMessageId === message.id ? '...' : '[SAVE]'}
                 </button>
               ) : null}
               {message.role === 'assistant' ? (
                 <>
                   <button
                     type="button"
+                    className="icon-button"
                     onClick={() => props.onBranchFromMessage(message)}
                     disabled={!props.selectedCamp || props.isSending}
+                    title="Branch"
                   >
-                    Branch
+                    [BRANCH]
                   </button>
                   <button
                     type="button"
+                    className="icon-button"
                     onClick={() => props.onReplayFromMessage(message)}
                     disabled={!props.selectedCamp || props.isSending}
+                    title="Replay"
                   >
-                    Replay
+                    [REPLAY]
                   </button>
                 </>
               ) : null}
