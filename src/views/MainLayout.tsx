@@ -255,7 +255,7 @@ export function MainLayout() {
   const [inspectExportError, setInspectExportError] = useState<string | null>(null);
 
   // Layout states
-  const [leftTab, setLeftTab] = useState<'camps' | 'files' | 'context'>('camps');
+  const [leftTab, setLeftTab] = useState<'files' | 'context'>('files');
   const [centerMode, setCenterMode] = useState<string>('editor');
   const [rightMode, setRightMode] = useState<'chat' | 'team'>('chat');
   const [leftPaneWidth, setLeftPaneWidth] = useState(260);
@@ -1778,24 +1778,6 @@ export function MainLayout() {
         <LeftPane
           activeTab={leftTab}
           onTabChange={setLeftTab}
-          renderCamps={() => (
-            <div className="camp-list-scroll" style={{ border: 'none', background: 'transparent' }}>
-              {camps.map((camp) => (
-                <button
-                  type="button"
-                  key={camp.id}
-                  className={`camp-list-item ${camp.id === selectedCampId ? 'active' : ''}`}
-                  onClick={() => setSelectedCampId(camp.id)}
-                >
-                  <strong>{camp.name}</strong>
-                  <span>{camp.model}</span>
-                </button>
-              ))}
-              {camps.length === 0 ? (
-                <ViewState.Empty title="No Camps" message="Create your first basecamp to begin orchestrating." icon="⛺" />
-              ) : null}
-            </div>
-          )}
           renderFiles={() => (
             <div className="context-tree-scroll" style={{ border: 'none', background: 'transparent' }}>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--space-2)' }}>

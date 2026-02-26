@@ -10,7 +10,7 @@
 .trail-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  align-items: baseline;
   gap: var(--space-2);
   padding: var(--space-4);
   border: var(--border-width) solid var(--line);
@@ -41,6 +41,36 @@
   white-space: nowrap;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.left-pane-tabs {
+  display: flex;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--space-1);
+}
+
+.pane-tab {
+  background: transparent;
+  border: none;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  text-transform: uppercase;
+  transition: color 0.2s;
+}
+
+.pane-tab:hover,
+.pane-tab:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+.pane-tab.active {
+  color: var(--text);
+  font-weight: bold;
 }
 
 .trail-toolbar {
@@ -539,6 +569,36 @@ label span,
 
 .artifact-select-toggle.is-selected p {
   color: var(--bg);
+}
+
+.left-pane-tabs {
+  display: flex;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--space-1);
+}
+
+.pane-tab {
+  background: transparent;
+  border: none;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  text-transform: uppercase;
+  transition: color 0.2s;
+}
+
+.pane-tab:hover,
+.pane-tab:focus-visible {
+  color: var(--text);
+  outline: none;
+}
+
+.pane-tab.active {
+  color: var(--text);
+  font-weight: bold;
 }
 
 .tool-approval-queue {
